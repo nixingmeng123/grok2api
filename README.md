@@ -206,6 +206,26 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"grok-4.5-high","stream":true,"messages":[{"role":"user","content":"写一个带测试的排序函数"}]}'
 ```
 
+OpenAI Responses API 兼容接口：
+
+```bash
+curl http://localhost:8000/v1/responses \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"grok-4.5-high","stream":true,"input":"你好"}'
+```
+
+如果客户端支持设置思考强度，也可以传 `reasoning.effort`：
+
+```bash
+curl http://localhost:8000/v1/responses \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"grok-4.5-console","stream":true,"reasoning":{"effort":"high"},"input":"写一个带测试的排序函数"}'
+```
+
+Cherry Studio 可选 `OpenAI Compatible`，模式选择 `Responses API` 或 `OpenAI Responses`，Base URL 填到 `/v1` 结尾，例如 `https://your-domain.com/v1`，模型填 `grok-4.5-high`。
+
 API 基础地址格式：
 
 ```text
