@@ -21,6 +21,8 @@ Grok 网页端能力的 OpenAI / Anthropic 兼容 API 网关
 
 - 新增 `grok-4.5-fast` 模型别名。
 - `grok-4.5-fast` 映射到 Grok 网页端 `fast` 模式，即当前网页端显示的 Grok 4.5 Fast。
+- 新增 `grok-4.5-console` / `grok-4.5-low` / `grok-4.5-medium` / `grok-4.5-high`。
+- 4.5 thinking 系列走 `console.x.ai/v1/responses`，实际上游模型字段为 `grok-4.5`，并按模型名固定 `reasoning.effort`。
 - 标准版 `docker-compose.yml` 已改为从本仓库源码构建，不再直接拉取原作者 `ghcr.io/jiujiu532/grok2api:latest` 镜像。
 - 防封版 `docker-compose.warp.yml` 的 grok2api 主服务也已改为从本仓库源码构建。
 
@@ -128,12 +130,17 @@ grok2api
 
 | 模型名 | 路由 | 说明 |
 | :-- | :-- | :-- |
-| `grok-4.5-fast` | grok.com `fast` | 本仓库新增，网页端 Grok 4.5 Fast 模式 |
+| `grok-4.5-fast` | grok.com `fast` | 网页端 Grok 4.5 Fast 模式，速度快 |
+| `grok-4.5-console` | console.x.ai | Console 版 Grok 4.5，默认低思考 |
+| `grok-4.5-low` | console.x.ai | Grok 4.5，`reasoning.effort=low` |
+| `grok-4.5-medium` | console.x.ai | Grok 4.5，`reasoning.effort=medium` |
+| `grok-4.5-high` | console.x.ai | Grok 4.5，`reasoning.effort=high`，适合复杂代码/推理 |
 | `grok-4.20-fast` | grok.com `fast` | 上游已有 fast 别名 |
 | `grok-4.3-fast` | grok.com `fast` | 上游已有 fast 别名 |
+| `grok-4.3-low` / `medium` / `high` | console.x.ai | Grok 4.3 thinking 系列 |
 | `grok-4.20-auto` | grok.com `auto` | 需要对应账号等级 |
 | `grok-4.20-expert` | grok.com `expert` | 需要对应账号等级 |
-| `grok-4.20-multi-agent-console` | console.x.ai | Console 路由，可能更适合复杂推理，但更容易触发上游限制 |
+| `grok-4.20-multi-agent-console` | console.x.ai | Console 多智能体路由，可能更适合复杂推理，但更容易触发上游限制 |
 
 验证 `grok-4.5-fast` 是否走网页端 fast 路由：
 
@@ -155,6 +162,30 @@ mode_str: fast
 is_console: False
 ```
 
+验证 `grok-4.5-high` 是否走 Console thinking 路由：
+
+```bash
+docker exec -i grok2api python - <<'PY'
+from app.control.model.registry import resolve
+from app.dataplane.reverse.protocol.xai_console_chat import build_console_payload
+m = resolve("grok-4.5-high")
+p = build_console_payload(messages=[{"role":"user","content":"hi"}], model="grok-4.5-high")
+print("model:", m.model_name)
+print("is_console:", m.is_console_chat())
+print("upstream_model:", p["model"])
+print("reasoning:", p.get("reasoning"))
+PY
+```
+
+期望输出包含：
+
+```text
+model: grok-4.5-high
+is_console: True
+upstream_model: grok-4.5
+reasoning: {'effort': 'high'}
+```
+
 ## API 示例
 
 OpenAI 兼容聊天接口：
@@ -164,6 +195,15 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"grok-4.5-fast","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+```
+
+高思考强度示例：
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"grok-4.5-high","stream":true,"messages":[{"role":"user","content":"写一个带测试的排序函数"}]}'
 ```
 
 API 基础地址格式：
@@ -187,7 +227,7 @@ https://your-domain.com/v1
 https://github.com/nixingmeng123/grok2api
 
 不要使用 ghcr.io/jiujiu532/grok2api:latest 镜像，因为那是原作者版本。
-请从本仓库 git clone 后执行 docker compose up -d --build，确保部署的是 nixingmeng123 修改版，支持 grok-4.5-fast。
+请从本仓库 git clone 后执行 docker compose up -d --build，确保部署的是 nixingmeng123 修改版，支持 grok-4.5-fast 以及 grok-4.5-low / medium / high。
 ```
 
 ## 常见问题
@@ -196,7 +236,8 @@ https://github.com/nixingmeng123/grok2api
 | :-- | :-- |
 | 为什么 README 以前有 `jiujiu532`？ | 本仓库是从 `jiujiu532/grok2api` fork 修改而来。现在主部署说明已改成本仓库。 |
 | 为什么防封版还有 `jiujiu532/privoxy-warp`？ | 那是辅助代理镜像，不是 grok2api 主程序。grok2api 主程序从本仓库 build。 |
-| 为什么不能直接 `docker pull ghcr.io/jiujiu532/grok2api:latest`？ | 那会拉原作者镜像，不包含本仓库的 `grok-4.5-fast` 修改。 |
+| 为什么不能直接 `docker pull ghcr.io/jiujiu532/grok2api:latest`？ | 那会拉原作者镜像，不包含本仓库的修改。 |
+| `grok-4.5-fast` 和 `grok-4.5-high` 有什么区别？ | `fast` 走 grok.com 网页端 fast；`high` 走 console.x.ai，并带 `reasoning.effort=high`。 |
 | 朋友点 GitHub 链接能直接运行吗？ | 不能。GitHub 是源码仓库，朋友需要 clone 后 docker build / docker compose 部署。 |
 | 图片上传 403 是什么？ | 通常是上游 asset upload 被拒或模拟上传链路不稳定，和纯文字聊天不是同一条接口。 |
 
