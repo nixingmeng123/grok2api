@@ -145,6 +145,14 @@ _EFFORT_VALUES = {"none", "minimal", "low", "medium", "high", "xhigh"}
 _LITE_IMAGE_MODELS = {"grok-imagine-image-lite"}
 
 
+def _responses_reasoning_effort(req: ResponsesCreateRequest) -> str | None:
+    if isinstance(req.reasoning, dict):
+        effort = req.reasoning.get("effort")
+        if isinstance(effort, str) and effort:
+            return effort
+    return req.reasoning_effort
+
+
 def _validate_chat(req: ChatCompletionRequest) -> None:
     from app.platform.errors import ValidationError
 
@@ -393,11 +401,17 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
     )
 
-    # Map reasoning param → emit_think flag.
-    # reasoning=None → use config; reasoning.effort="none" → off; otherwise on.
-    if req.reasoning is None:
+    # Map reasoning param -> emit_think flag.
+    # No explicit effort uses config; effort="none" disables thinking.
+    reasoning_effort = _responses_reasoning_effort(req)
+    if reasoning_effort is not None and reasoning_effort not in _EFFORT_VALUES:
+        raise _ValidationError(
+            f"reasoning.effort must be one of {sorted(_EFFORT_VALUES)}",
+            param="reasoning.effort",
+        )
+    if reasoning_effort is None:
         emit_think = cfg.get_bool("features.thinking", True)
-    elif isinstance(req.reasoning, dict) and req.reasoning.get("effort") == "none":
+    elif reasoning_effort == "none":
         emit_think = False
     else:
         emit_think = True
@@ -410,6 +424,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         instructions=req.instructions,
         stream=is_stream,
         emit_think=emit_think,
+        reasoning_effort=reasoning_effort,
         temperature=req.temperature or 0.8,
         top_p=req.top_p or 0.95,
         tools=req.tools or None,
