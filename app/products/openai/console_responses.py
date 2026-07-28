@@ -85,6 +85,7 @@ async def create(
     messages: list[dict],
     stream: bool,
     emit_think: bool,
+    reasoning_effort: str | None,
     temperature: float,
     top_p: float,
     response_id: str,
@@ -99,8 +100,11 @@ async def create(
     max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
 
-    # reasoning effort 映射
-    effort = "low" if emit_think else "none"
+    # Preserve explicit Responses API reasoning.effort when provided.
+    # If omitted, let build_console_payload use the model/default effort.
+    effort = reasoning_effort if reasoning_effort is not None else None
+    if effort is None and not emit_think:
+        effort = "none"
 
     from app.dataplane.account import _directory as _acct_dir
     if _acct_dir is None:

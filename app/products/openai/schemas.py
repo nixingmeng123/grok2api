@@ -70,6 +70,7 @@ class ResponsesCreateRequest(BaseModel):
     instructions:         str | None           = None
     stream:               bool | None          = None
     reasoning:            dict[str, Any] | None = None
+    reasoning_effort:     str | None            = None
     temperature:          float | None         = None
     top_p:                float | None         = None
     # silently ignored

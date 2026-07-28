@@ -152,6 +152,25 @@ def build_resp_usage(input_tokens: int, output_tokens: int, reasoning_tokens: in
     }
 
 
+def _response_output_text(output: list[dict]) -> str:
+    """Return a Responses API-compatible flat text view of message output."""
+    parts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content") or []
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("output_text", "text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+    return "".join(parts)
+
+
 def make_resp_object(
     response_id: str,
     model:       str,
@@ -166,6 +185,7 @@ def make_resp_object(
         "status":     status,
         "model":      model,
         "output":     output,
+        "output_text": _response_output_text(output),
     }
     if usage is not None:
         obj["usage"] = usage
