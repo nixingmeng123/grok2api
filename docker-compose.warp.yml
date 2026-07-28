@@ -41,9 +41,11 @@ services:
       TZ: Asia/Shanghai
       LOG_LEVEL: info
 
-  # ── grok2api ──────────────────────────────────────────────────────────────
+  # ── grok2api：从本仓库源码构建，使用 nixingmeng123 修改版 ────────────────
   grok2api:
-    image: ghcr.io/jiujiu532/grok2api:latest
+    build:
+      context: .
+    image: nixingmeng123/grok2api:local
     container_name: grok2api
     restart: unless-stopped
     ports:
