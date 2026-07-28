@@ -113,10 +113,12 @@ _XML_PARAMS_RE  = re.compile(r"<parameters\s*>(.*?)</parameters\s*>", re.DOTALL 
 
 def _parse_xml_tool_calls(text: str) -> list[ParsedToolCall]:
     root_m = _XML_ROOT_RE.search(text)
-    if not root_m:
-        return []
+    # Some upstream models occasionally omit or misspell the plural root
+    # while still emitting valid <tool_call> children. Parse the whole text
+    # as a fallback so the client does not receive raw XML.
+    root_content = root_m.group(1) if root_m else text
     calls: list[ParsedToolCall] = []
-    for call_m in _XML_CALL_RE.finditer(root_m.group(1)):
+    for call_m in _XML_CALL_RE.finditer(root_content):
         inner = call_m.group(1)
         name_m   = _XML_NAME_RE.search(inner)
         params_m = _XML_PARAMS_RE.search(inner)

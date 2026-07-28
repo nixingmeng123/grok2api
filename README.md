@@ -23,6 +23,9 @@ Grok 网页端能力的 OpenAI / Anthropic 兼容 API 网关
 - `grok-4.5-fast` 映射到 Grok 网页端 `fast` 模式，即当前网页端显示的 Grok 4.5 Fast。
 - 新增 `grok-4.5-console` / `grok-4.5-low` / `grok-4.5-medium` / `grok-4.5-high`。
 - 4.5 thinking 系列走 `console.x.ai/v1/responses`，实际上游模型字段为 `grok-4.5`，并按模型名固定 `reasoning.effort`。
+- `/v1/messages` 支持 Claude Code 原生工具调用，可使用 Read、Write、Edit、Glob、Grep、Bash、PowerShell 等客户端工具。
+- Claude Code 的 WebSearch / WebFetch 交给 Grok 上游搜索处理，避免依赖客户端额外的安全分类器。
+- 增加多轮工具结果转换、异常 XML 兼容和重复文件写入保护。
 - 标准版 `docker-compose.yml` 已改为从本仓库源码构建，不再直接拉取原作者 `ghcr.io/jiujiu532/grok2api:latest` 镜像。
 - 防封版 `docker-compose.warp.yml` 的 grok2api 主服务也已改为从本仓库源码构建。
 
@@ -225,6 +228,24 @@ curl http://localhost:8000/v1/responses \
 ```
 
 Cherry Studio 可选 `OpenAI Compatible`，模式选择 `Responses API` 或 `OpenAI Responses`，Base URL 填到 `/v1` 结尾，例如 `https://your-domain.com/v1`，模型填 `grok-4.5-high`。
+
+### Claude Code
+
+Claude Code 使用 Anthropic Messages API，Base URL 填服务根地址，不要添加 `/v1`：
+
+```text
+http://服务器IP:8000
+```
+
+使用反向代理时：
+
+```text
+https://your-domain.com
+```
+
+推荐模型为 `grok-4.5-high`。本版本会把 Claude Code 提供的 Read、Write、Edit、Glob、Grep、Bash、PowerShell 等工具作为原生 function tools 转发，并将结果转换回 Anthropic `tool_use`。WebSearch / WebFetch 由 Grok 上游搜索处理。
+
+文件读取、写入和命令执行发生在运行 Claude Code 的客户端机器上，不是在 grok2api 服务器容器内执行。客户端仍需授予相应目录权限。
 
 API 基础地址格式：
 

@@ -34,7 +34,7 @@ from app.dataplane.reverse.protocol.tool_parser import ParsedToolCall, parse_too
 
 # We start buffering as soon as we see the opening of a <tool_calls> tag.
 # Using a prefix match so we catch it even before the `>` arrives.
-_OPEN_TAG_RE  = re.compile(r"<tool_calls[\s>]?", re.IGNORECASE)
+_OPEN_TAG_RE  = re.compile(r"<tool_calls?[\s>]?", re.IGNORECASE)
 _CLOSE_TAG    = "</tool_calls>"
 _CLOSE_TAG_RE = re.compile(r"</tool_calls\s*>", re.IGNORECASE)
 
@@ -104,7 +104,10 @@ class ToolSieve:
         if m is None:
             # No opening tag; safe to forward.  Keep the last few chars in
             # the buffer in case the tag straddles a chunk boundary.
-            safe, leftover = _split_at_boundary(combined, "<tool_calls")
+            safe, leftover = _split_at_boundaries(
+                combined,
+                ("<tool_calls", "<tool_call"),
+            )
             self._buf = leftover
             return safe, None
 
@@ -148,3 +151,14 @@ def _split_at_boundary(text: str, prefix: str) -> tuple[str, str]:
         if text.endswith(prefix[:i]):
             return text[: -i], text[-i:]
     return text, ""
+
+
+def _split_at_boundaries(text: str, prefixes: tuple[str, ...]) -> tuple[str, str]:
+    best_safe = text
+    best_leftover = ""
+    for prefix in prefixes:
+        safe, leftover = _split_at_boundary(text, prefix)
+        if len(leftover) > len(best_leftover):
+            best_safe = safe
+            best_leftover = leftover
+    return best_safe, best_leftover
