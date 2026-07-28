@@ -43,6 +43,10 @@ from app.platform.logging.logger import logger
 # console.x.ai 上可用的模型（通过 grok.com SSO 免费访问）
 # key = grok2api 对外暴露的模型名，value = console.x.ai 实际 model 字段
 CONSOLE_MODELS: dict[str, str] = {
+    "grok-4.5-console":                     "grok-4.5",
+    "grok-4.5-low":                         "grok-4.5",
+    "grok-4.5-medium":                      "grok-4.5",
+    "grok-4.5-high":                        "grok-4.5",
     "grok-4.3-console":                     "grok-4.3",
     "grok-4.3-low":                         "grok-4.3",
     "grok-4.3-medium":                      "grok-4.3",
@@ -58,14 +62,18 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-build-console":                   "grok-build-0.1",
 }
 
-# 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
+# 需要附带 reasoning 字段的模型。
 _MODELS_WITH_REASONING_FIELD: frozenset[str] = frozenset({
+    "grok-4.5",
     "grok-4.3",
     "grok-4.20-multi-agent-0309",
 })
 
 # 模型名后缀 → 固定 effort 值（优先级高于用户传入的 reasoning_effort）
 _MODEL_FIXED_EFFORT: dict[str, str] = {
+    "grok-4.5-low":    "low",
+    "grok-4.5-medium": "medium",
+    "grok-4.5-high":   "high",
     "grok-4.3-low":    "low",
     "grok-4.3-medium": "medium",
     "grok-4.3-high":   "high",
@@ -87,6 +95,7 @@ _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset({
     "grok-4.20-0309",
     "grok-4.20-0309-reasoning",
     "grok-4.20-0309-non-reasoning",
+    "grok-4.5",
     "grok-4.3",
     "grok-build-0.1",
 })
@@ -176,7 +185,6 @@ def build_console_payload(
         "stream": stream,
     }
 
-    # 只有 grok-4.3 需要附带 reasoning 字段，grok-4.20 系列不需要
     if console_model in _MODELS_WITH_REASONING_FIELD:
         payload["reasoning"] = {"effort": effort}
 
