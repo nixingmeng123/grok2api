@@ -296,6 +296,7 @@ async def create(
 
     # Tool injection
     tool_names: list[str] = []
+    chat_tools: list[dict] | None = None
     internal_tool_choice: Any = None
     if tools:
         chat_tools       = _convert_tools(tools)
@@ -328,6 +329,8 @@ async def create(
             temperature=temperature,
             top_p=top_p,
             msg_id=msg_id,
+            tools=chat_tools,
+            tool_choice=internal_tool_choice,
         )
 
     # -------------------------------------------------------------------------
