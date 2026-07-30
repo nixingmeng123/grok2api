@@ -111,6 +111,7 @@ async def _emit_fc_events(items: list[dict], base_idx: int):
             "type":         "response.function_call_arguments.done",
             "item_id":      fc_item_id,
             "output_index": out_idx,
+            "name":         item["name"],
             "arguments":    item["arguments"],
         })
         yield format_sse("response.output_item.done", {
@@ -235,6 +236,7 @@ async def create(
 
     # Tool prompt injection — only modify the message text, never the Grok payload
     # Normalise to Chat Completions format first (Responses API uses a flat structure)
+    chat_tools: list[dict] = []
     tool_names: list[str] = []
     if tools:
         chat_tools = _to_chat_tools(tools)
@@ -271,6 +273,8 @@ async def create(
             response_id=response_id,
             reasoning_id=reasoning_id,
             message_id=message_id,
+            tools=chat_tools or None,
+            tool_choice=tool_choice,
         )
 
     # -------------------------------------------------------------------------

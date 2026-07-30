@@ -107,7 +107,7 @@ refresh_interval = 3600
 # [Transport 层] 触发重建代理 Session 的 HTTP 状态码
 reset_session_status_codes = [403]
 # [App 层] 换账号重试最大次数（0 = 不重试）
-max_retries = 1
+max_retries = 50
 # [App 层] 触发换账号重试的 HTTP 状态码，英文逗号分隔
 on_codes = "429,401,503"
 

@@ -16,12 +16,11 @@ def selection_max_retries() -> int:
     """Retry count for account-swap loops, aware of the active selection strategy.
 
     - ``random`` strategy: fixed at :data:`_RANDOM_MAX_RETRIES` (=5).
-    - ``quota`` strategy:  reads ``retry.max_retries`` (default 1), preserving
-      the historical behaviour.
+    - ``quota`` strategy: reads ``retry.max_retries`` (default 50).
     """
     if current_strategy() == "random":
         return _RANDOM_MAX_RETRIES
-    return int(get_config("retry.max_retries", 1))
+    return int(get_config("retry.max_retries", 50))
 
 
 def mode_candidates(spec: ModelSpec) -> tuple[int, ...]:

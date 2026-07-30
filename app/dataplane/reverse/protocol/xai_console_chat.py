@@ -145,6 +145,20 @@ def _convert_function_tools(tools: list[dict[str, Any]] | None) -> list[dict[str
     return converted
 
 
+def client_function_tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
+    """Return the names of valid client-declared function tools."""
+    names: set[str] = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        source = function if isinstance(function, dict) else tool
+        name = str(source.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def _convert_tool_choice(tool_choice: Any) -> Any:
     """Convert Chat Completions tool_choice to Responses API format."""
     if tool_choice is None:
@@ -314,13 +328,31 @@ class ConsoleStreamAdapter:
     response.completed 事件用于提取 usage 统计。
     """
 
-    __slots__ = ("text_buf", "usage", "_done", "_function_items")
+    __slots__ = (
+        "text_buf",
+        "usage",
+        "_done",
+        "_function_items",
+        "_function_tool_names",
+    )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        function_tool_names: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.text_buf: list[str] = []
         self.usage: dict[str, Any] | None = None
         self._done = False
         self._function_items: dict[str, dict[str, Any]] = {}
+        self._function_tool_names = (
+            None
+            if function_tool_names is None
+            else {
+                str(name).strip()
+                for name in function_tool_names
+                if str(name).strip()
+            }
+        )
 
     @staticmethod
     def _function_key(item: dict[str, Any], fallback: Any = None) -> str:
@@ -416,6 +448,11 @@ class ConsoleStreamAdapter:
         for record in self._function_items.values():
             name = str(record.get("name") or "").strip()
             if not name:
+                continue
+            if (
+                self._function_tool_names is not None
+                and name not in self._function_tool_names
+            ):
                 continue
             arguments = record.get("arguments")
             if arguments in (None, ""):
@@ -551,6 +588,7 @@ def _status_feedback(status: int):
 __all__ = [
     "CONSOLE_MODELS",
     "build_console_payload",
+    "client_function_tool_names",
     "ConsoleStreamAdapter",
     "classify_console_line",
     "stream_console_chat",

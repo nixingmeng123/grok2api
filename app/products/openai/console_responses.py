@@ -16,7 +16,11 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
-from app.platform.tokens import estimate_prompt_tokens, estimate_tokens
+from app.platform.tokens import (
+    estimate_prompt_tokens,
+    estimate_tokens,
+    estimate_tool_call_tokens,
+)
 from app.control.account.enums import FeedbackKind
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.account.runtime import get_refresh_service
@@ -35,6 +39,32 @@ from ._format import (
     build_resp_usage,
     format_sse,
 )
+from .responses import _build_fc_items, _emit_fc_events
+
+
+def _client_function_tool_names(tools: list[dict] | None) -> set[str]:
+    """Return valid function names from Chat Completions-style tools."""
+    names: set[str] = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _client_function_calls(
+    adapter: ConsoleStreamAdapter,
+    tool_names: set[str],
+) -> list:
+    """Keep only function calls declared by the Responses API client."""
+    if not tool_names:
+        return []
+    return [call for call in adapter.function_calls if call.name in tool_names]
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -91,6 +121,8 @@ async def create(
     response_id: str,
     reasoning_id: str,
     message_id: str,
+    tools: list[dict] | None = None,
+    tool_choice: Any = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Console models /v1/responses handler."""
 
@@ -105,6 +137,7 @@ async def create(
     effort = reasoning_effort if reasoning_effort is not None else None
     if effort is None and not emit_think:
         effort = "none"
+    function_tool_names = _client_function_tool_names(tools)
 
     from app.dataplane.account import _directory as _acct_dir
     if _acct_dir is None:
@@ -138,6 +171,8 @@ async def create(
                         top_p=top_p,
                         reasoning_effort=effort,
                         stream=True,
+                        tools=tools,
+                        tool_choice=tool_choice,
                     )
 
                     try:
@@ -199,6 +234,11 @@ async def create(
 
                         # 流结束
                         full_text = "".join(text_buf)
+                        function_calls = _client_function_calls(
+                            adapter,
+                            function_tool_names,
+                        )
+                        function_items = _build_fc_items(function_calls)
 
                         # output_text.done
                         yield format_sse("response.output_text.done", {
@@ -231,6 +271,11 @@ async def create(
                             },
                         })
 
+                        # Native function calls returned by console.x.ai.
+                        # The message item above occupies output_index=0.
+                        async for event in _emit_fc_events(function_items, 1):
+                            yield event
+
                         # usage
                         usage_data = adapter.usage
                         input_tokens = (
@@ -239,7 +284,10 @@ async def create(
                         )
                         output_tokens = (
                             usage_data.get("output_tokens", 0) if usage_data
-                            else estimate_tokens(full_text)
+                            else (
+                                estimate_tokens(full_text)
+                                + estimate_tool_call_tokens(function_calls)
+                            )
                         )
 
                         # response.completed
@@ -249,7 +297,7 @@ async def create(
                             "role": "assistant",
                             "status": "completed",
                             "content": [{"type": "output_text", "text": full_text}],
-                        }]
+                        }, *function_items]
                         yield format_sse("response.completed", {
                             "type": "response.completed",
                             "response": make_resp_object(
@@ -260,8 +308,10 @@ async def create(
                         yield "data: [DONE]\n\n"
                         success = True
                         logger.info(
-                            "console responses stream completed: model={} text_len={} attempt={}/{}",
-                            model, len(full_text), attempt + 1, max_retries + 1,
+                            "console responses stream completed: model={} text_len={} "
+                            "function_calls={} attempt={}/{}",
+                            model, len(full_text), len(function_items),
+                            attempt + 1, max_retries + 1,
                         )
 
                     except UpstreamError as exc:
@@ -321,6 +371,8 @@ async def create(
                 top_p=top_p,
                 reasoning_effort=effort,
                 stream=True,
+                tools=tools,
+                tool_choice=tool_choice,
             )
 
             try:
@@ -330,6 +382,11 @@ async def create(
                     adapter.feed(event_type, data)
 
                 full_text = adapter.full_text
+                function_calls = _client_function_calls(
+                    adapter,
+                    function_tool_names,
+                )
+                function_items = _build_fc_items(function_calls)
                 usage_data = adapter.usage
                 input_tokens = (
                     usage_data.get("input_tokens", 0) if usage_data
@@ -337,24 +394,27 @@ async def create(
                 )
                 output_tokens = (
                     usage_data.get("output_tokens", 0) if usage_data
-                    else estimate_tokens(full_text)
+                    else (
+                        estimate_tokens(full_text)
+                        + estimate_tool_call_tokens(function_calls)
+                    )
                 )
-
                 output_items = [{
                     "id": message_id,
                     "type": "message",
                     "role": "assistant",
                     "status": "completed",
                     "content": [{"type": "output_text", "text": full_text}],
-                }]
+                }, *function_items]
                 result = make_resp_object(
                     response_id, model, "completed", output_items,
                     usage=build_resp_usage(input_tokens, output_tokens),
                 )
                 success = True
                 logger.info(
-                    "console responses non-stream completed: model={} text_len={}",
-                    model, len(full_text),
+                    "console responses non-stream completed: model={} text_len={} "
+                    "function_calls={}",
+                    model, len(full_text), len(function_items),
                 )
                 return result
 
