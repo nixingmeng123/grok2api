@@ -1,7 +1,7 @@
 """XAI console.x.ai chat protocol — payload builder and SSE stream adapter.
 
 端点: POST https://console.x.ai/v1/responses
-认证: Authorization: Bearer anonymous  +  Cookie: sso=<token>; sso-rw=<token>
+认证: short-lived DPoP access token + per-request ES256 proof
 
 请求格式 (OpenAI Responses API):
 {
@@ -507,27 +507,61 @@ async def stream_console_chat(
     from app.dataplane.proxy import get_proxy_runtime
     from app.dataplane.proxy.adapters.headers import build_console_headers
     from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
-    from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
+    from app.dataplane.reverse.protocol.xai_console_dpop import (
+        apply_dpop_headers,
+        dpop_sessions,
+    )
+    from app.dataplane.reverse.runtime.endpoint_table import (
+        CONSOLE_DPOP_TOKEN,
+        CONSOLE_RESPONSES,
+    )
 
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire()
 
-    headers = build_console_headers(token, lease=lease)
     payload_bytes = orjson.dumps(payload)
     session_kwargs = build_session_kwargs(lease=lease)
 
     async with ResettableSession(**session_kwargs) as session:
-        try:
-            response = await session.post(
-                CONSOLE_RESPONSES,
-                headers=headers,
-                data=payload_bytes,
-                timeout=timeout_s,
-                stream=True,
-            )
-        except Exception as exc:
-            await proxy.feedback(lease, _transport_error_feedback())
-            raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
+        response = None
+        for auth_attempt in range(2):
+            try:
+                dpop_session, cache_key = await dpop_sessions.get(
+                    sso_token=token,
+                    lease=lease,
+                    http_session=session,
+                    token_endpoint=CONSOLE_DPOP_TOKEN,
+                    timeout_s=timeout_s,
+                    force=auth_attempt > 0,
+                )
+                headers = build_console_headers(token, lease=lease)
+                apply_dpop_headers(
+                    headers,
+                    dpop_session,
+                    method="POST",
+                    url=CONSOLE_RESPONSES,
+                )
+                response = await session.post(
+                    CONSOLE_RESPONSES,
+                    headers=headers,
+                    data=payload_bytes,
+                    timeout=timeout_s,
+                    stream=True,
+                )
+            except UpstreamError as exc:
+                await proxy.feedback(lease, _status_feedback(exc.status))
+                raise
+            except Exception as exc:
+                await proxy.feedback(lease, _transport_error_feedback())
+                raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
+
+            if response.status_code != 401 or auth_attempt > 0:
+                break
+            await _discard_response(response)
+            dpop_sessions.invalidate(cache_key, dpop_session.access_token)
+
+        if response is None:
+            raise UpstreamError("Console DPoP request failed", status=502)
 
         if response.status_code != 200:
             try:
@@ -562,6 +596,15 @@ async def stream_console_chat(
                     return
         except Exception as exc:
             raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
+
+
+async def _discard_response(response: Any) -> None:
+    """Drain a rejected streamed response before reusing the HTTP session."""
+    try:
+        async for _ in response.aiter_content():
+            pass
+    except Exception:
+        pass
 
 
 def _success_feedback():

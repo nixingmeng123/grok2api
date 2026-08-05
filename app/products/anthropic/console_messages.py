@@ -36,6 +36,32 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
 
 
+_HEARTBEAT_INTERVAL_S = 5.0
+
+
+async def _with_heartbeats(iterator, *, interval_s: float | None = None):
+    """Yield None while waiting for a quiet upstream iterator."""
+    interval = interval_s or _HEARTBEAT_INTERVAL_S
+    upstream = iterator.__aiter__()
+    while True:
+        next_item = asyncio.create_task(anext(upstream))
+        try:
+            while True:
+                done, _ = await asyncio.wait({next_item}, timeout=interval)
+                if next_item in done:
+                    break
+                yield None
+            try:
+                item = next_item.result()
+            except StopAsyncIteration:
+                return
+        finally:
+            if not next_item.done():
+                next_item.cancel()
+                await asyncio.gather(next_item, return_exceptions=True)
+        yield item
+
+
 def _log_task_exception(task: "asyncio.Task") -> None:
     exc = task.exception() if not task.cancelled() else None
     if exc:
@@ -339,6 +365,7 @@ async def create(
                 success = False
                 fail_exc: BaseException | None = None
                 _retry = False
+                response_committed = False
                 adapter = ConsoleStreamAdapter()
                 text_buf: list[str] = []
                 sieve = ToolSieve(tool_names) if tool_names else None
@@ -360,26 +387,45 @@ async def create(
                     )
 
                     try:
-                        # message_start
-                        yield _sse("message_start", {
-                            "type": "message_start",
-                            "message": {
-                                "id": msg_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "model": model,
-                                "content": [],
-                                "stop_reason": None,
-                                "usage": {"input_tokens": estimate_prompt_tokens(request_messages), "output_tokens": 0},
-                            },
-                        })
-                        yield _sse("ping", {"type": "ping"})
-
-                        yield ": heartbeat\n\n"
-                        async for event_type, data in stream_console_chat(
+                        upstream = stream_console_chat(
                             token, payload, timeout_s=timeout_s
-                        ):
+                        )
+                        stream_started = False
+                        async for upstream_event in _with_heartbeats(upstream):
+                            if upstream_event is None:
+                                response_committed = True
+                                yield ": heartbeat\n\n"
+                                continue
+
+                            event_type, data = upstream_event
+                            if not stream_started and event_type == "error":
+                                adapter.feed(event_type, data)
+
+                            if not stream_started:
+                                stream_started = True
+                                response_committed = True
+                                yield _sse("message_start", {
+                                    "type": "message_start",
+                                    "message": {
+                                        "id": msg_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "model": model,
+                                        "content": [],
+                                        "stop_reason": None,
+                                        "usage": {"input_tokens": estimate_prompt_tokens(request_messages), "output_tokens": 0},
+                                    },
+                                })
+                                yield _sse("ping", {"type": "ping"})
+                                yield ": heartbeat\n\n"
+
                             tokens = adapter.feed(event_type, data)
+                            if not tokens:
+                                # Native function-call arguments can be very
+                                # large. Keep Cloudflare and Claude Code from
+                                # treating that otherwise-silent period as a
+                                # dead connection.
+                                yield ": heartbeat\n\n"
                             for tok in tokens:
                                 if sieve is not None:
                                     text_chunk, calls = sieve.feed(tok)
@@ -541,6 +587,23 @@ async def create(
                                 tool_output_tokens = estimate_tool_call_tokens(calls)
                                 tool_calls_emitted = True
 
+                        if not stream_started:
+                            stream_started = True
+                            response_committed = True
+                            yield _sse("message_start", {
+                                "type": "message_start",
+                                "message": {
+                                    "id": msg_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "model": model,
+                                    "content": [],
+                                    "stop_reason": None,
+                                    "usage": {"input_tokens": estimate_prompt_tokens(request_messages), "output_tokens": 0},
+                                },
+                            })
+                            yield _sse("ping", {"type": "ping"})
+
                         full_text = "".join(text_buf)
                         if tool_calls_emitted:
                             yield _sse("message_delta", {
@@ -571,7 +634,6 @@ async def create(
                             })
 
                         yield _sse("message_stop", {"type": "message_stop"})
-                        yield "data: [DONE]\n\n"
                         success = True
                         logger.info(
                             "console messages stream completed: model={} text_len={} attempt={}/{}",
@@ -580,13 +642,23 @@ async def create(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            not response_committed
+                            and _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "console messages retry: attempt={}/{} status={}",
                                 attempt + 1, max_retries, exc.status,
                             )
                         else:
+                            if response_committed:
+                                logger.warning(
+                                    "console messages stream aborted after downstream commit: "
+                                    "model={} status={}",
+                                    model, exc.status,
+                                )
                             raise
 
                 finally:

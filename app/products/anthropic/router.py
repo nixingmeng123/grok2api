@@ -62,14 +62,12 @@ async def _safe_sse_anthropic(stream):
         err = exc.to_dict()["error"]
         payload = orjson.dumps({"type": "error", "error": err}).decode()
         yield f"event: error\ndata: {payload}\n\n"
-        yield "data: [DONE]\n\n"
     except Exception as exc:
         payload = orjson.dumps({
             "type": "error",
             "error": {"type": "api_error", "message": str(exc)},
         }).decode()
         yield f"event: error\ndata: {payload}\n\n"
-        yield "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------

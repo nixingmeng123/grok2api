@@ -44,9 +44,10 @@ WS_LIVEKIT        = "wss://livekit.grok.com"
 LIVEKIT_TOKENS    = f"{BASE}/rest/livekit/tokens"              # POST
 
 # ── Console API (console.x.ai) ───────────────────────────────────────────
-# 使用 Bearer token 认证，与 grok.com SSO token 共享同一套凭证
+# Console exchanges the grok.com SSO credential for a short-lived DPoP token.
 CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"             # POST (OpenAI Responses API)
 CONSOLE_CHAT      = f"{CONSOLE_BASE}/v1/chat/completions"      # POST (OpenAI Chat API)
+CONSOLE_DPOP_TOKEN = f"{CONSOLE_BASE}/v1/dpop/token"           # POST (short-lived DPoP token)
 
 
 __all__ = [
@@ -57,5 +58,5 @@ __all__ = [
     "ACCEPT_TOS", "NSFW_MGMT", "SET_BIRTH",
     "MEDIA_POST", "MEDIA_POST_LINK", "VIDEO_UPSCALE",
     "WS_IMAGINE", "WS_LIVEKIT", "LIVEKIT_TOKENS",
-    "CONSOLE_RESPONSES", "CONSOLE_CHAT",
+    "CONSOLE_RESPONSES", "CONSOLE_CHAT", "CONSOLE_DPOP_TOKEN",
 ]

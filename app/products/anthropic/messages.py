@@ -57,6 +57,32 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
 
 
+_HEARTBEAT_INTERVAL_S = 5.0
+
+
+async def _with_heartbeats(iterator, *, interval_s: float | None = None):
+    """Yield None while waiting for a quiet upstream iterator."""
+    interval = interval_s or _HEARTBEAT_INTERVAL_S
+    upstream = iterator.__aiter__()
+    while True:
+        next_item = asyncio.create_task(anext(upstream))
+        try:
+            while True:
+                done, _ = await asyncio.wait({next_item}, timeout=interval)
+                if next_item in done:
+                    break
+                yield None
+            try:
+                item = next_item.result()
+            except StopAsyncIteration:
+                return
+        finally:
+            if not next_item.done():
+                next_item.cancel()
+                await asyncio.gather(next_item, return_exceptions=True)
+        yield item
+
+
 # ---------------------------------------------------------------------------
 # Request conversion: Anthropic → internal format
 # ---------------------------------------------------------------------------
@@ -351,6 +377,7 @@ async def create(
             token   = acct.token
             success = False
             _retry  = False
+            response_committed = False
             fail_exc: BaseException | None = None
             adapter               = StreamAdapter()
             think_buf:  list[str] = []
@@ -366,33 +393,44 @@ async def create(
 
             try:
                 try:
-                    # message_start
-                    yield _sse("message_start", {
-                        "type": "message_start",
-                        "message": {
-                            "id":          msg_id,
-                            "type":        "message",
-                            "role":        "assistant",
-                            "model":       model,
-                            "content":     [],
-                            "stop_reason": None,
-                            "usage":       {"input_tokens": estimate_prompt_tokens(internal_message), "output_tokens": 0},
-                        },
-                    })
-                    yield _sse("ping", {"type": "ping"})
-
-                    ended = False
-                    yield ": heartbeat\n\n"
-                    async for line in _stream_chat(
+                    upstream = _stream_chat(
                         token     = token,
                         mode_id   = ModeId(selected_mode_id),
                         message   = internal_message,
                         files     = files,
                         timeout_s = timeout_s,
-                    ):
+                    )
+
+                    ended = False
+                    stream_started = False
+                    async for line in _with_heartbeats(upstream):
+                        if line is None:
+                            response_committed = True
+                            yield ": heartbeat\n\n"
+                            continue
+
+                        if not stream_started:
+                            stream_started = True
+                            response_committed = True
+                            yield _sse("message_start", {
+                                "type": "message_start",
+                                "message": {
+                                    "id":          msg_id,
+                                    "type":        "message",
+                                    "role":        "assistant",
+                                    "model":       model,
+                                    "content":     [],
+                                    "stop_reason": None,
+                                    "usage":       {"input_tokens": estimate_prompt_tokens(internal_message), "output_tokens": 0},
+                                },
+                            })
+                            yield _sse("ping", {"type": "ping"})
+                            yield ": heartbeat\n\n"
+
                         if tool_calls_emitted:
                             break
 
+                        emitted_output = False
                         event_type, data = classify_line(line)
                         if event_type == "done":
                             break
@@ -404,12 +442,14 @@ async def create(
                             if ev.kind == "thinking" and emit_think and not think_closed:
                                 if not think_started:
                                     think_started = True
+                                    emitted_output = True
                                     yield _sse("content_block_start", {
                                         "type":          "content_block_start",
                                         "index":         block_index,
                                         "content_block": {"type": "thinking", "thinking": ""},
                                     })
                                 think_buf.append(ev.content)
+                                emitted_output = True
                                 yield _sse("content_block_delta", {
                                     "type":  "content_block_delta",
                                     "index": block_index,
@@ -420,6 +460,7 @@ async def create(
                                 # Close thinking block if open
                                 if think_started and not think_closed:
                                     think_closed = True
+                                    emitted_output = True
                                     yield _sse("content_block_stop", {
                                         "type":  "content_block_stop",
                                         "index": block_index,
@@ -432,6 +473,7 @@ async def create(
                                     if calls is not None:
                                         # Emit tool_use blocks
                                         for call in calls:
+                                            emitted_output = True
                                             yield _sse("content_block_start", {
                                                 "type":  "content_block_start",
                                                 "index": block_index,
@@ -466,12 +508,14 @@ async def create(
                                 if text_chunk:
                                     if not text_started:
                                         text_started = True
+                                        emitted_output = True
                                         yield _sse("content_block_start", {
                                             "type":          "content_block_start",
                                             "index":         block_index,
                                             "content_block": {"type": "text", "text": ""},
                                         })
                                     text_buf.append(text_chunk)
+                                    emitted_output = True
                                     yield _sse("content_block_delta", {
                                         "type":  "content_block_delta",
                                         "index": block_index,
@@ -487,6 +531,25 @@ async def create(
 
                         if ended:
                             break
+                        if not emitted_output:
+                            yield ": heartbeat\n\n"
+
+                    if not stream_started:
+                        stream_started = True
+                        response_committed = True
+                        yield _sse("message_start", {
+                            "type": "message_start",
+                            "message": {
+                                "id":          msg_id,
+                                "type":        "message",
+                                "role":        "assistant",
+                                "model":       model,
+                                "content":     [],
+                                "stop_reason": None,
+                                "usage":       {"input_tokens": estimate_prompt_tokens(internal_message), "output_tokens": 0},
+                            },
+                        })
+                        yield _sse("ping", {"type": "ping"})
 
                     # Flush sieve — incomplete XML at end of stream
                     if sieve is not None and not tool_calls_emitted:
@@ -539,7 +602,6 @@ async def create(
                             "usage": {"output_tokens": tool_output_tokens},
                         })
                         yield _sse("message_stop", {"type": "message_stop"})
-                        yield "data: [DONE]\n\n"
                         success = True
                         logger.info("messages stream tool_calls: attempt={}/{} model={}",
                                     attempt + 1, max_retries + 1, model)
@@ -600,7 +662,6 @@ async def create(
                             "usage": {"output_tokens": out_tokens},
                         })
                         yield _sse("message_stop", {"type": "message_stop"})
-                        yield "data: [DONE]\n\n"
                         success = True
                         logger.info(
                             "messages stream completed: attempt={}/{} model={} text_len={} think_len={} images={}",
@@ -610,13 +671,23 @@ async def create(
 
                 except UpstreamError as exc:
                     fail_exc = exc
-                    if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                    if (
+                        not response_committed
+                        and _should_retry_upstream(exc, retry_codes)
+                        and attempt < max_retries
+                    ):
                         _retry = True
                         logger.warning(
                             "messages stream retry: attempt={}/{} status={} token={}...",
                             attempt + 1, max_retries, exc.status, token[:8],
                         )
                     else:
+                        if response_committed:
+                            logger.warning(
+                                "messages stream aborted after downstream commit: "
+                                "model={} status={}",
+                                model, exc.status,
+                            )
                         raise
 
             finally:

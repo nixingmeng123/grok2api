@@ -1,14 +1,17 @@
+import asyncio
 import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from app.platform.errors import UpstreamError
 from app.dataplane.reverse.protocol.xai_console_chat import (
     ConsoleStreamAdapter,
     build_console_payload,
     client_function_tool_names,
 )
 from app.products.openai import console_responses, responses
+from app.products.anthropic import console_messages as anthropic_console_messages
 from app.products.anthropic.console_messages import (
     _last_successful_tool_action,
     _native_tool_calls,
@@ -478,6 +481,162 @@ class ConsoleResponsesToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured_payload["tools"][-1]["name"], "Write")
         self.assertEqual(captured_payload["tool_choice"], "auto")
+
+
+class AnthropicConsoleStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def _create_stream(
+        self,
+        fake_stream,
+        *,
+        max_retries=0,
+        reserve_side_effect=None,
+    ):
+        directory = SimpleNamespace(
+            release=AsyncMock(),
+            feedback=AsyncMock(),
+        )
+        accounts = reserve_side_effect or [
+            (SimpleNamespace(token="test-token"), 5),
+        ]
+        cfg = SimpleNamespace(get_float=lambda key, default: default)
+
+        patches = (
+            patch.object(anthropic_console_messages, "get_config", return_value=cfg),
+            patch.object(
+                anthropic_console_messages,
+                "resolve_model",
+                return_value=SimpleNamespace(),
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "selection_max_retries",
+                return_value=max_retries,
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "_configured_retry_codes",
+                return_value=frozenset({429}),
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "reserve_account",
+                new_callable=AsyncMock,
+                side_effect=accounts,
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "stream_console_chat",
+                new=fake_stream,
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "_quota_sync",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                anthropic_console_messages,
+                "_fail_sync",
+                new_callable=AsyncMock,
+            ),
+            patch("app.dataplane.account._directory", directory),
+        )
+        for active_patch in patches:
+            active_patch.start()
+            self.addCleanup(active_patch.stop)
+
+        return await anthropic_console_messages.create(
+            model="grok-4.5-high",
+            messages=[{"role": "user", "content": "Say hello"}],
+            stream=True,
+            emit_think=True,
+            temperature=0.7,
+            top_p=0.95,
+            msg_id="msg_test",
+        )
+
+    async def test_stream_uses_anthropic_termination_only(self):
+        async def fake_stream(token, payload, *, timeout_s):
+            yield "response.output_text.delta", json.dumps({"delta": "hello"})
+            yield "response.completed", json.dumps({
+                "response": {"usage": {"input_tokens": 1, "output_tokens": 1}},
+            })
+
+        stream = await self._create_stream(fake_stream)
+        chunks = [chunk async for chunk in stream]
+        output = "".join(chunks)
+
+        self.assertEqual(output.count("event: message_start"), 1)
+        self.assertEqual(output.count("event: message_stop"), 1)
+        self.assertNotIn("[DONE]", output)
+
+    async def test_stream_sends_periodic_heartbeats_during_upstream_silence(self):
+        async def fake_stream(token, payload, *, timeout_s):
+            await asyncio.sleep(0.03)
+            yield "response.output_text.delta", json.dumps({"delta": "hello"})
+            await asyncio.sleep(0.03)
+            yield "response.completed", json.dumps({"response": {}})
+
+        with patch.object(
+            anthropic_console_messages,
+            "_HEARTBEAT_INTERVAL_S",
+            0.005,
+        ):
+            stream = await self._create_stream(fake_stream)
+            chunks = [chunk async for chunk in stream]
+
+        self.assertEqual(chunks[0], ": heartbeat\n\n")
+        self.assertGreaterEqual(chunks.count(": heartbeat\n\n"), 6)
+        output = "".join(chunks)
+        self.assertEqual(output.count("event: message_start"), 1)
+        self.assertEqual(output.count("event: message_stop"), 1)
+
+    async def test_retry_before_first_event_does_not_splice_streams(self):
+        calls = []
+
+        async def fake_stream(token, payload, *, timeout_s):
+            calls.append(token)
+            if token == "first-token":
+                raise UpstreamError("rate limited", status=429)
+            yield "response.output_text.delta", json.dumps({"delta": "ok"})
+            yield "response.completed", json.dumps({"response": {}})
+
+        stream = await self._create_stream(
+            fake_stream,
+            max_retries=1,
+            reserve_side_effect=[
+                (SimpleNamespace(token="first-token"), 5),
+                (SimpleNamespace(token="second-token"), 5),
+            ],
+        )
+        output = "".join([chunk async for chunk in stream])
+
+        self.assertEqual(calls, ["first-token", "second-token"])
+        self.assertEqual(output.count("event: message_start"), 1)
+        self.assertEqual(output.count("event: message_stop"), 1)
+
+    async def test_error_after_commit_is_not_retried(self):
+        calls = []
+
+        async def fake_stream(token, payload, *, timeout_s):
+            calls.append(token)
+            yield "response.created", json.dumps({"response": {"id": "resp_1"}})
+            raise UpstreamError("connection reset", status=429)
+
+        stream = await self._create_stream(
+            fake_stream,
+            max_retries=1,
+            reserve_side_effect=[
+                (SimpleNamespace(token="first-token"), 5),
+                (SimpleNamespace(token="second-token"), 5),
+            ],
+        )
+        chunks = []
+        with self.assertRaises(UpstreamError):
+            async for chunk in stream:
+                chunks.append(chunk)
+
+        self.assertEqual(calls, ["first-token"])
+        self.assertEqual("".join(chunks).count("event: message_start"), 1)
 
 
 if __name__ == "__main__":

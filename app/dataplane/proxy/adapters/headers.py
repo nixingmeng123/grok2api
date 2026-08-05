@@ -312,14 +312,13 @@ def build_console_headers(
     *,
     lease: ProxyLease | None = None,
     content_type: str = "application/json",
+    include_cluster: bool = True,
 ) -> dict[str, str]:
-    """Build headers for console.x.ai/v1/responses requests.
+    """Build browser headers for Console DPoP token and API requests.
 
-    抓包确认的认证方式：
-    - Authorization: Bearer anonymous  （固定值）
-    - Cookie: sso=<token>; sso-rw=<token>; cf_clearance=...  （身份 + CF clearance）
-
-    cf_clearance 从 proxy lease 的 clearance profile 中获取（与 grok.com 共用同一套机制）。
+    Authorization and DPoP proof headers are applied per request by the
+    Console protocol layer. The SSO cookie remains necessary when exchanging
+    the short-lived DPoP access token.
     """
     tok = sso_token[4:] if sso_token.startswith("sso=") else sso_token
     tok = _sanitize(tok, field="sso_token", strip_spaces=True)
@@ -337,7 +336,6 @@ def build_console_headers(
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Authorization": "Bearer anonymous",
         "Content-Type": content_type,
         "Cookie": cookie,
         "Origin": "https://console.x.ai",
@@ -351,8 +349,9 @@ def build_console_headers(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
         ),
-        "x-cluster": "https://us-east-1.api.x.ai",
     }
+    if include_cluster:
+        headers["x-cluster"] = "https://us-east-1.api.x.ai"
     headers.update(_client_hints(profile.browser, profile.user_agent))
     return headers
 
