@@ -114,6 +114,17 @@ async def get_model_endpoint(model_id: str, request: Request):
 # ---------------------------------------------------------------------------
 
 
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Return the first concrete error from nested single-failure task groups."""
+    current = exc
+    while isinstance(current, BaseExceptionGroup) and current.exceptions:
+        regular_errors = [
+            item for item in current.exceptions if isinstance(item, Exception)
+        ]
+        current = regular_errors[0] if regular_errors else current.exceptions[0]
+    return current
+
+
 async def _safe_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
     """Wrap an SSE stream, converting exceptions to in-band error events."""
     try:
@@ -124,9 +135,13 @@ async def _safe_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
         yield f"event: error\ndata: {payload}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as exc:
-        payload = orjson.dumps(
-            {"error": {"message": str(exc), "type": "server_error"}}
-        ).decode()
+        logger.exception("OpenAI chat SSE stream failed: {}", exc)
+        concrete = _unwrap_exception_group(exc)
+        if isinstance(concrete, AppError):
+            error = concrete.to_dict()["error"]
+        else:
+            error = {"message": str(concrete), "type": "server_error"}
+        payload = orjson.dumps({"error": error}).decode()
         yield f"event: error\ndata: {payload}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -363,13 +378,13 @@ async def _safe_sse_responses(stream) -> AsyncGenerator[str, None]:
         async for chunk in stream:
             yield chunk
     except Exception as exc:
-        from app.platform.errors import AppError
-
-        if isinstance(exc, AppError):
-            err = exc.to_dict()["error"]
+        logger.exception("OpenAI Responses SSE stream failed: {}", exc)
+        concrete = _unwrap_exception_group(exc)
+        if isinstance(concrete, AppError):
+            err = concrete.to_dict()["error"]
         else:
             err = {
-                "message": str(exc),
+                "message": str(concrete),
                 "type": "server_error",
                 "code": None,
                 "param": None,

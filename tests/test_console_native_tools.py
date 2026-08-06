@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -33,6 +34,8 @@ WRITE_TOOL = {
         },
     },
 }
+
+openai_router = importlib.import_module("app.products.openai.router")
 
 
 class ConsoleNativeToolTests(unittest.TestCase):
@@ -637,6 +640,40 @@ class AnthropicConsoleStreamTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, ["first-token"])
         self.assertEqual("".join(chunks).count("event: message_start"), 1)
+
+
+class OpenAISSEErrorTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    async def _wrapped_error_stream():
+        raise ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [UpstreamError("Image generation returned no images", status=502)],
+        )
+        yield "unreachable"
+
+    async def test_chat_sse_unwraps_single_taskgroup_error(self):
+        chunks = [
+            chunk
+            async for chunk in openai_router._safe_sse(
+                self._wrapped_error_stream()
+            )
+        ]
+        output = "".join(chunks)
+
+        self.assertIn("Image generation returned no images", output)
+        self.assertNotIn("unhandled errors in a TaskGroup", output)
+
+    async def test_responses_sse_unwraps_single_taskgroup_error(self):
+        chunks = [
+            chunk
+            async for chunk in openai_router._safe_sse_responses(
+                self._wrapped_error_stream()
+            )
+        ]
+        output = "".join(chunks)
+
+        self.assertIn("Image generation returned no images", output)
+        self.assertNotIn("unhandled errors in a TaskGroup", output)
 
 
 if __name__ == "__main__":
