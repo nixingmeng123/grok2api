@@ -29,6 +29,7 @@ from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_video
 from app.control.account.enums import FeedbackKind
+from app.control.model.enums import ModeId
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
 from app.dataplane.proxy import get_proxy_runtime
@@ -39,6 +40,13 @@ from app.dataplane.reverse.protocol.xai_assets import (
     resolve_download_url,
 )
 from app.dataplane.reverse.protocol.xai_chat import classify_line, raise_for_stream_error
+from app.dataplane.reverse.protocol.xai_console_video import (
+    build_console_video_payload,
+    download_console_video,
+    generate_console_video,
+    trusted_console_video_url,
+    valid_console_image_url,
+)
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import (
     resolve_uploaded_asset_reference,
@@ -46,6 +54,7 @@ from app.dataplane.reverse.transport.asset_upload import (
 )
 from app.dataplane.reverse.transport.assets import download_asset
 from app.dataplane.reverse.transport.media import create_media_post
+from app.products._account_selection import selection_max_retries
 from ._format import (
     make_chat_response,
     make_response_id,
@@ -61,6 +70,11 @@ _VIDEO_QUALITY = "standard"
 _VIDEO_OBJECT = "video"
 _VIDEO_JOB_TTL_S = 3600
 _VIDEO_EXTENSION_REF_TYPE = "ORIGINAL_REF_TYPE_VIDEO_EXTENSION"
+_CONSOLE_VIDEO_MAX_SECONDS = 15
+_CONSOLE_VIDEO_COOLDOWN_S = 4 * 60 * 60
+_CONSOLE_VIDEO_MIN_TIMEOUT_S = 15 * 60.0
+_VIDEO_HEARTBEAT_INTERVAL_S = 5.0
+_CONSOLE_VIDEO_RETRY_STATUSES = frozenset({401, 403, 429})
 _SUPPORTED_VIDEO_LENGTHS = frozenset({6, 10, 12, 16, 20})
 _VIDEO_SIZE_MAP: dict[str, tuple[str, str]] = {
     "720x1280": ("9:16", "720p"),
@@ -84,6 +98,7 @@ class _VideoArtifact:
     asset_id: str
     thumbnail_url: str
     remixed_from_video_id: str | None = None
+    auth_token: str = ""
 
 
 @dataclass(slots=True)
@@ -133,6 +148,7 @@ class _VideoJob:
 
 _VIDEO_JOBS: dict[str, _VideoJob] = {}
 _VIDEO_JOBS_LOCK = asyncio.Lock()
+_CONSOLE_VIDEO_COOLDOWN_UNTIL: dict[str, float] = {}
 
 
 def _build_message(prompt: str, preset: str) -> str:
@@ -563,6 +579,9 @@ async def _collect_video_segment(
 
 
 async def _download_video_bytes(token: str, url: str) -> tuple[bytes, str]:
+    if trusted_console_video_url(url):
+        timeout_s = get_config().get_float("asset.download_timeout", 120.0)
+        return await download_console_video(url, timeout_s=timeout_s)
     try:
         stream, content_type = await download_asset(token, url)
         chunks: list[bytes] = []
@@ -716,6 +735,62 @@ async def _generate_video_with_token(
     return artifact
 
 
+def _console_reference_url(
+    input_references: list[dict[str, Any]] | None,
+) -> str:
+    if not input_references:
+        return ""
+    if len(input_references) != 1:
+        return ""
+    value = str(input_references[0].get("image_url") or "").strip()
+    return value if value and valid_console_image_url(value) else ""
+
+
+def _should_use_console_video(
+    *,
+    seconds: int,
+    input_references: list[dict[str, Any]] | None,
+) -> bool:
+    if seconds > _CONSOLE_VIDEO_MAX_SECONDS:
+        return False
+    if not input_references:
+        return True
+    return bool(_console_reference_url(input_references))
+
+
+async def _generate_console_video_with_token(
+    *,
+    token: str,
+    prompt: str,
+    aspect_ratio: str,
+    resolution_name: str,
+    seconds: int,
+    timeout_s: float,
+    input_references: list[dict[str, Any]] | None = None,
+    progress_cb: Callable[[int], Awaitable[None]] | None = None,
+) -> _VideoArtifact:
+    payload = build_console_video_payload(
+        prompt=prompt,
+        duration=seconds,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution_name,
+        image_url=_console_reference_url(input_references),
+    )
+    result = await generate_console_video(
+        token,
+        payload,
+        timeout_s=timeout_s,
+        progress_cb=progress_cb,
+    )
+    return _VideoArtifact(
+        video_url=result.url,
+        video_post_id="",
+        asset_id="",
+        thumbnail_url="",
+        auth_token=token,
+    )
+
+
 async def _run_video_generation(
     *,
     model: str,
@@ -727,6 +802,27 @@ async def _run_video_generation(
     input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
+    if _should_use_console_video(
+        seconds=seconds,
+        input_references=input_references,
+    ):
+        async def _console_runner(token: str, timeout_s: float) -> _VideoArtifact:
+            return await _generate_console_video_with_token(
+                token=token,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                resolution_name=resolution_name,
+                seconds=seconds,
+                timeout_s=timeout_s,
+                input_references=input_references,
+                progress_cb=progress_cb,
+            )
+
+        return await _run_console_video_with_account(
+            model=model,
+            runner=_console_runner,
+        )
+
     async def _runner(token: str, timeout_s: float) -> _VideoArtifact:
         return await _generate_video_with_token(
             token=token,
@@ -741,6 +837,93 @@ async def _run_video_generation(
         )
 
     return await _run_video_with_account(model=model, runner=_runner)
+
+
+async def _run_console_video_with_account(
+    *,
+    model: str,
+    runner: Callable[[str, float], Awaitable[Any]],
+) -> Any:
+    cfg = get_config()
+    timeout_s = max(
+        cfg.get_float("video.timeout", 180.0),
+        _CONSOLE_VIDEO_MIN_TIMEOUT_S,
+    )
+    max_retries = selection_max_retries()
+    spec = resolve_model(model)
+    if not spec.is_video():
+        raise ValidationError(f"Model {model!r} is not a video model", param="model")
+
+    from app.dataplane.account import _directory as _acct_dir
+
+    if _acct_dir is None:
+        raise RateLimitError("Account directory not initialised")
+
+    now = time.time()
+    excluded = [
+        token
+        for token, cooling_until in list(_CONSOLE_VIDEO_COOLDOWN_UNTIL.items())
+        if cooling_until > now
+    ]
+    for token, cooling_until in list(_CONSOLE_VIDEO_COOLDOWN_UNTIL.items()):
+        if cooling_until <= now:
+            _CONSOLE_VIDEO_COOLDOWN_UNTIL.pop(token, None)
+
+    last_error: UpstreamError | None = None
+    for attempt in range(max_retries + 1):
+        acct = await _acct_dir.reserve_any(
+            pool_candidates=spec.pool_candidates(),
+            exclude_tokens=excluded,
+            now_s_override=now_s(),
+        )
+        if acct is None:
+            break
+        token = acct.token
+        try:
+            result = await runner(token, timeout_s)
+            logger.info(
+                "console video completed: attempt={}/{}",
+                attempt + 1,
+                max_retries + 1,
+            )
+            return result
+        except UpstreamError as exc:
+            last_error = exc
+            if exc.details.get("video_request_id"):
+                body = str(exc.details.get("body") or "").replace("\n", " ")[:400]
+                logger.warning(
+                    "console video job failed after creation: request_id={} "
+                    "status={} retry=disabled body={}",
+                    exc.details["video_request_id"],
+                    exc.status,
+                    body,
+                )
+                raise
+            excluded.append(token)
+            if exc.status == 401:
+                await _acct_dir.feedback(
+                    token,
+                    FeedbackKind.UNAUTHORIZED,
+                    int(ModeId.CONSOLE),
+                )
+            if exc.status in {401, 403, 429}:
+                _CONSOLE_VIDEO_COOLDOWN_UNTIL[token] = (
+                    time.time() + _CONSOLE_VIDEO_COOLDOWN_S
+                )
+            if exc.status not in _CONSOLE_VIDEO_RETRY_STATUSES:
+                raise
+            logger.warning(
+                "console video retry: attempt={}/{} status={}",
+                attempt + 1,
+                max_retries,
+                exc.status,
+            )
+        finally:
+            await _acct_dir.release(acct)
+
+    if last_error is not None:
+        raise last_error
+    raise RateLimitError("No available accounts for Console video generation")
 
 
 async def _run_video_with_account(
@@ -772,6 +955,8 @@ async def _run_video_with_account(
     fail_exc: BaseException | None = None
     try:
         artifact = await runner(token, timeout_s)
+        if isinstance(artifact, _VideoArtifact) and not artifact.auth_token:
+            artifact.auth_token = token
         success = True
         return artifact
     except BaseException as exc:
@@ -840,63 +1025,25 @@ async def _run_video_job(
             default=default_resolution_name,
         )
         resolved_preset = _resolve_video_preset(preset)
-        spec = resolve_model(job.model)
+        async def _progress(progress: int) -> None:
+            await _set_job_status(
+                job, status="in_progress", progress=max(1, progress)
+            )
 
-        from app.dataplane.account import _directory as _acct_dir
-
-        if _acct_dir is None:
-            raise RateLimitError("Account directory not initialised")
-
-        acct = await _acct_dir.reserve(
-            pool_candidates=spec.pool_candidates(),
-            mode_id=int(spec.mode_id),
-            now_s_override=now_s(),
+        artifact = await _run_video_generation(
+            model=job.model,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            resolution_name=resolved_resolution_name,
+            seconds=seconds,
+            preset=resolved_preset,
+            input_references=input_references,
+            progress_cb=_progress,
         )
-        if acct is None:
-            raise RateLimitError("No available accounts for video generation")
-
-        token = acct.token
-        success = False
-        fail_exc: BaseException | None = None
-        try:
-            cfg = get_config()
-            timeout_s = cfg.get_float("video.timeout", 180.0)
-
-            async def _progress(progress: int) -> None:
-                await _set_job_status(
-                    job, status="in_progress", progress=max(1, progress)
-                )
-
-            artifact = await _generate_video_with_token(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                resolution_name=resolved_resolution_name,
-                seconds=seconds,
-                preset=resolved_preset,
-                timeout_s=timeout_s,
-                input_references=input_references,
-                progress_cb=_progress,
-            )
-            raw, _mime = await _download_video_bytes(token, artifact.video_url)
-            success = True
-        except BaseException as exc:
-            fail_exc = exc
-            raise
-        finally:
-            await _acct_dir.release(acct)
-            kind = (
-                FeedbackKind.SUCCESS
-                if success
-                else _feedback_kind(fail_exc)
-                if fail_exc
-                else FeedbackKind.SERVER_ERROR
-            )
-            await _acct_dir.feedback(token, kind, int(spec.mode_id))
-            if success:
-                asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-            else:
-                asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+        raw, _mime = await _download_video_bytes(
+            artifact.auth_token,
+            artifact.video_url,
+        )
 
         path = _save_video_bytes(raw, job.id)
         async with _VIDEO_JOBS_LOCK:
@@ -1065,32 +1212,29 @@ async def completions(
     response_id = make_response_id()
 
     async def _run(progress_cb: Callable[[int], Awaitable[None]] | None = None) -> str:
-        async def _runner(token: str, timeout_s: float) -> str:
-            artifact = await _generate_video_with_token(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                resolution_name=resolved_resolution_name,
-                seconds=seconds,
-                preset=resolved_preset,
-                timeout_s=timeout_s,
-                input_references=input_references,
-                progress_cb=progress_cb,
-            )
-            file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
-            return await _resolve_video_output(
-                token=token,
-                url=artifact.video_url,
-                file_id=file_id,
-            )
-
-        return await _run_video_with_account(model=model, runner=_runner)
+        artifact = await _run_video_generation(
+            model=model,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            resolution_name=resolved_resolution_name,
+            seconds=seconds,
+            preset=resolved_preset,
+            input_references=input_references,
+            progress_cb=progress_cb,
+        )
+        file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
+        return await _resolve_video_output(
+            token=artifact.auth_token,
+            url=artifact.video_url,
+            file_id=file_id,
+        )
 
     if is_stream:
 
         async def _sse() -> AsyncGenerator[str, None]:
             queue: asyncio.Queue[int] = asyncio.Queue()
             last_progress = -1
+            last_emit_at = time.monotonic()
 
             async def _progress(progress: int) -> None:
                 await queue.put(max(0, min(100, progress)))
@@ -1100,6 +1244,10 @@ async def completions(
                 try:
                     progress = await asyncio.wait_for(queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    now = time.monotonic()
+                    if now - last_emit_at >= _VIDEO_HEARTBEAT_INTERVAL_S:
+                        yield ": heartbeat\n\n"
+                        last_emit_at = now
                     continue
                 if progress > last_progress:
                     last_progress = progress
@@ -1107,6 +1255,7 @@ async def completions(
                         response_id, model, _progress_reason_delta(progress)
                     )
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                    last_emit_at = time.monotonic()
 
             content = await task
             chunk = make_stream_chunk(response_id, model, content)

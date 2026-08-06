@@ -26,6 +26,8 @@ Grok 网页端能力的 OpenAI / Anthropic 兼容 API 网关
 - `/v1/messages` 支持 Claude Code 原生工具调用，可使用 Read、Write、Edit、Glob、Grep、Bash、PowerShell 等客户端工具。
 - Claude Code 的 WebSearch / WebFetch 交给 Grok 上游搜索处理，避免依赖客户端额外的安全分类器。
 - 增加多轮工具结果转换、异常 XML 兼容和重复文件写入保护。
+- `grok-imagine-video` 支持 Free/Basic 账号的 Console DPoP 视频额度，可进行文生视频和单图生视频。
+- Console 视频使用异步轮询、SSE 心跳和防重复提交保护；内容审核拒绝会返回明确错误。
 - 标准版 `docker-compose.yml` 已改为从本仓库源码构建，不再直接拉取原作者 `ghcr.io/jiujiu532/grok2api:latest` 镜像。
 - 防封版 `docker-compose.warp.yml` 的 grok2api 主服务也已改为从本仓库源码构建。
 
@@ -144,6 +146,7 @@ grok2api
 | `grok-4.20-auto` | grok.com `auto` | 需要对应账号等级 |
 | `grok-4.20-expert` | grok.com `expert` | 需要对应账号等级 |
 | `grok-4.20-multi-agent-console` | console.x.ai | Console 多智能体路由，可能更适合复杂推理，但更容易触发上游限制 |
+| `grok-imagine-video` | console.x.ai | Free/Basic Console 视频，支持 6/10/12 秒文生视频和单图生视频 |
 
 验证 `grok-4.5-fast` 是否走网页端 fast 路由：
 
@@ -229,6 +232,19 @@ curl http://localhost:8000/v1/responses \
 
 Cherry Studio 可选 `OpenAI Compatible`，模式选择 `Responses API` 或 `OpenAI Responses`，Base URL 填到 `/v1` 结尾，例如 `https://your-domain.com/v1`，模型填 `grok-4.5-high`。
 
+Console 视频示例：
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "model=grok-imagine-video" \
+  -F "prompt=未来都市雨后夜景，镜头平稳向前移动" \
+  -F "seconds=6" \
+  -F "size=1280x720"
+```
+
+视频生成可能需要数分钟。流式 WebUI 会每 5 秒发送心跳，最长等待 15 分钟；拿到上游 `request_id` 后不会自动重新提交，以免重复消耗额度。内容审核由 xAI 上游执行，审核拒绝不是部署故障。
+
 ### Claude Code
 
 Claude Code 使用 Anthropic Messages API，Base URL 填服务根地址，不要添加 `/v1`：
@@ -268,7 +284,7 @@ https://your-domain.com/v1
 https://github.com/nixingmeng123/grok2api
 
 不要使用 ghcr.io/jiujiu532/grok2api:latest 镜像，因为那是原作者版本。
-请从本仓库 git clone 后执行 docker compose up -d --build，确保部署的是 nixingmeng123 修改版，支持 grok-4.5-fast 以及 grok-4.5-low / medium / high。
+请从本仓库 git clone 后执行 docker compose up -d --build，确保部署的是 nixingmeng123 修改版，支持 grok-4.5-fast、grok-4.5-low / medium / high，以及 Free/Basic Console 视频。
 ```
 
 ## 常见问题
@@ -281,6 +297,8 @@ https://github.com/nixingmeng123/grok2api
 | `grok-4.5-fast` 和 `grok-4.5-high` 有什么区别？ | `fast` 走 grok.com 网页端 fast；`high` 走 console.x.ai，并带 `reasoning.effort=high`。 |
 | 朋友点 GitHub 链接能直接运行吗？ | 不能。GitHub 是源码仓库，朋友需要 clone 后 docker build / docker compose 部署。 |
 | 图片上传 403 是什么？ | 通常是上游 asset upload 被拒或模拟上传链路不稳定，和纯文字聊天不是同一条接口。 |
+| 视频停在 94% 正常吗？ | 上游可能在最后处理阶段停留较久。本版本会保持 SSE 连接并等待最多 15 分钟，不会自动重复提交同一任务。 |
+| 视频返回 `imagine:content-moderated` 是什么？ | 生成结果被 xAI 内容审核拒绝。请使用合规提示词重新生成；这不是服务器或协议故障。 |
 
 ## 上游与致谢
 

@@ -283,7 +283,7 @@ Runtime config can also be overridden via `GROK_`-prefixed env vars, e.g. `GROK_
 | `grok-imagine-image` | `auto` | `super` |
 | `grok-imagine-image-pro` | `auto` | `super` |
 | `grok-imagine-image-edit` | `auto` | `super` |
-| `grok-imagine-video` | `auto` | `super` |
+| `grok-imagine-video` | `fast` (Console DPoP) | `basic` |
 
 <br>
 

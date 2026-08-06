@@ -53,8 +53,8 @@ MODELS: tuple[ModelSpec, ...] = (
 
     # === Video ==============================================================
 
-    # Super+
-    ModelSpec("grok-imagine-video",                     ModeId.AUTO,     Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
+    # Console exposes a separate video quota for basic accounts.
+    ModelSpec("grok-imagine-video",                     ModeId.FAST,     Tier.BASIC, Capability.VIDEO,      True, "Grok Imagine Video"),
 
     # === Console Chat (console.x.ai/v1/responses) ===========================
     # 通过 console.x.ai 路由，使用 grok.com SSO token，免费账号可用
