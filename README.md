@@ -24,6 +24,7 @@ Grok 网页端能力的 OpenAI / Anthropic 兼容 API 网关
 - 新增 `grok-4.5-console` / `grok-4.5-low` / `grok-4.5-medium` / `grok-4.5-high`。
 - 4.5 thinking 系列走 `console.x.ai/v1/responses`，实际上游模型字段为 `grok-4.5`，并按模型名固定 `reasoning.effort`。
 - `/v1/messages` 支持 Claude Code 原生工具调用，可使用 Read、Write、Edit、Glob、Grep、Bash、PowerShell 等客户端工具。
+- Claude Code 在任务确实需要原创位图素材时，可自动调用 `grok-imagine-image-lite`，将图片下载到当前工作区后继续制作；后台可随时关闭此功能。
 - Claude Code 的 WebSearch / WebFetch 交给 Grok 上游搜索处理，避免依赖客户端额外的安全分类器。
 - 增加多轮工具结果转换、异常 XML 兼容和重复文件写入保护。
 - `grok-imagine-video` 支持 Free/Basic 账号的 Console DPoP 视频额度，可进行文生视频和单图生视频。
@@ -128,6 +129,7 @@ grok2api
 | `app.app_key` | Admin 后台密码 |
 | `app.api_key` | API 调用密钥 |
 | `app.app_url` | 公网访问地址，图片/视频链接需要，例如 `https://your-domain.com` |
+| `features.claude_code_auto_image` | Claude Code 自动生图开关；生图不可用时关闭即可，无需回滚代码 |
 
 配置保存后通常即时生效。
 

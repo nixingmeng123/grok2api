@@ -14,6 +14,7 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
 from app.products.openai import console_responses, responses
 from app.products.anthropic import console_messages as anthropic_console_messages
 from app.products.anthropic.console_messages import (
+    _build_console_tool_prompt,
     _last_successful_tool_action,
     _native_tool_calls,
 )
@@ -35,10 +36,57 @@ WRITE_TOOL = {
     },
 }
 
+POWERSHELL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "PowerShell",
+        "description": "Run a PowerShell command in the local workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}
+
 openai_router = importlib.import_module("app.products.openai.router")
 
 
 class ConsoleNativeToolTests(unittest.TestCase):
+    def test_tool_prompt_enables_workspace_image_generation(self):
+        prompt = _build_console_tool_prompt(
+            [WRITE_TOOL, POWERSHELL_TOOL],
+            "auto",
+            auto_image_enabled=True,
+            image_gateway_base="https://example.com/v1/",
+        )
+
+        self.assertIn("CLAUDE CODE IMAGE GENERATION", prompt)
+        self.assertIn("https://example.com/v1/images/generations", prompt)
+        self.assertIn("grok-imagine-image-lite", prompt)
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", prompt)
+        self.assertIn("download it into an appropriate assets directory", prompt)
+
+    def test_tool_prompt_can_disable_workspace_image_generation(self):
+        prompt = _build_console_tool_prompt(
+            [WRITE_TOOL, POWERSHELL_TOOL],
+            "auto",
+            auto_image_enabled=False,
+            image_gateway_base="https://example.com",
+        )
+
+        self.assertNotIn("CLAUDE CODE IMAGE GENERATION", prompt)
+
+    def test_tool_prompt_requires_a_local_shell_for_image_generation(self):
+        prompt = _build_console_tool_prompt(
+            [WRITE_TOOL],
+            "auto",
+            auto_image_enabled=True,
+            image_gateway_base="https://example.com",
+        )
+
+        self.assertNotIn("CLAUDE CODE IMAGE GENERATION", prompt)
+
     def test_client_function_tool_names_filters_invalid_tools(self):
         tools = [
             WRITE_TOOL,
@@ -402,7 +450,11 @@ class ConsoleResponsesToolTests(unittest.IsolatedAsyncioTestCase):
             release=AsyncMock(),
             feedback=AsyncMock(),
         )
-        cfg = SimpleNamespace(get_float=lambda key, default: default)
+        cfg = SimpleNamespace(
+            get_float=lambda key, default: default,
+            get_bool=lambda key, default: default,
+            get_str=lambda key, default: default,
+        )
         acct = SimpleNamespace(token="test-token")
 
         with (
@@ -501,7 +553,11 @@ class AnthropicConsoleStreamTests(unittest.IsolatedAsyncioTestCase):
         accounts = reserve_side_effect or [
             (SimpleNamespace(token="test-token"), 5),
         ]
-        cfg = SimpleNamespace(get_float=lambda key, default: default)
+        cfg = SimpleNamespace(
+            get_float=lambda key, default: default,
+            get_bool=lambda key, default: default,
+            get_str=lambda key, default: default,
+        )
 
         patches = (
             patch.object(anthropic_console_messages, "get_config", return_value=cfg),

@@ -89,7 +89,60 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _build_console_tool_prompt(tools: list[dict], tool_choice: Any) -> str:
+def _normalize_gateway_base(value: str) -> str:
+    base = (value or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base
+
+
+def _image_generation_prompt(
+    tool_names: list[str],
+    *,
+    enabled: bool,
+    gateway_base: str,
+) -> str:
+    if not enabled or not ({"PowerShell", "Bash"} & set(tool_names)):
+        return ""
+
+    base = _normalize_gateway_base(gateway_base)
+    endpoint = (
+        f"{base}/v1/images/generations"
+        if base
+        else "<ANTHROPIC_BASE_URL without a trailing /v1>/v1/images/generations"
+    )
+    return (
+        "\nCLAUDE CODE IMAGE GENERATION:\n"
+        "- Original bitmap image generation is available through this gateway. Use it "
+        "proactively when the user's task genuinely needs new photographic, illustrative, "
+        "texture, background, or other raster assets. Do not use it for icons, simple "
+        "diagrams, or visuals that are better implemented with HTML/CSS/SVG.\n"
+        "- Generate one asset at a time by using the real local PowerShell or Bash tool to "
+        f"POST {endpoint}. Send JSON with model=grok-imagine-image-lite, prompt, n=1, "
+        "size=1024x1024, and response_format=url.\n"
+        "- Authenticate without exposing credentials. Read the token at runtime from "
+        "ANTHROPIC_AUTH_TOKEN, falling back to ANTHROPIC_API_KEY, and send it as either "
+        "Authorization: Bearer <token> or x-api-key. Never print, echo, or embed the token "
+        "in generated files.\n"
+        "- If the endpoint above is expressed with ANTHROPIC_BASE_URL, read that variable at "
+        "runtime, trim trailing slashes and a trailing /v1, then append "
+        "/v1/images/generations.\n"
+        "- Read data[0].url from the JSON response, download it into an appropriate assets "
+        "directory in the user's current project, and reference that local file from the "
+        "page or application. Create the directory first when needed.\n"
+        "- Continue the original task after the download succeeds. If generation fails, "
+        "report the real error once and continue with a reasonable non-generated fallback; "
+        "do not loop or claim that an image was saved when it was not.\n"
+    )
+
+
+def _build_console_tool_prompt(
+    tools: list[dict],
+    tool_choice: Any,
+    *,
+    auto_image_enabled: bool = False,
+    image_gateway_base: str = "",
+) -> str:
     tool_names = extract_tool_names(tools)
     choice_instruction = ""
     if tool_choice == "required" or (
@@ -101,7 +154,7 @@ def _build_console_tool_prompt(tools: list[dict], tool_choice: Any) -> str:
         forced_name = function.get("name") if isinstance(function, dict) else tool_choice.get("name")
         if forced_name:
             choice_instruction = f" You must call the {forced_name} tool for this turn."
-    return (
+    prompt = (
         "CLAUDE CODE LOCAL TOOL ROUTING:\n"
         f"- The client provided these real local tools: {', '.join(tool_names)}.\n"
         "- Use the provided native function tools whenever the user asks to read, create, "
@@ -118,6 +171,11 @@ def _build_console_tool_prompt(tools: list[dict], tool_choice: Any) -> str:
         "the original task or repeat Write/Edit on the same file. If the requested work "
         "is complete, return a final plain-text summary without another tool call.\n"
         f"- Tool names are case-sensitive.{choice_instruction}"
+    )
+    return prompt + _image_generation_prompt(
+        tool_names,
+        enabled=auto_image_enabled,
+        gateway_base=image_gateway_base,
     )
 
 
@@ -156,10 +214,22 @@ def _prepare_console_messages(
     messages: list[dict],
     tools: list[dict] | None,
     tool_choice: Any,
+    *,
+    auto_image_enabled: bool = False,
+    image_gateway_base: str = "",
 ) -> tuple[list[dict], list[str]]:
     tool_names = extract_tool_names(tools or []) if tools else []
     prepared: list[dict] = []
-    tool_prompt = _build_console_tool_prompt(tools, tool_choice) if tools else ""
+    tool_prompt = (
+        _build_console_tool_prompt(
+            tools,
+            tool_choice,
+            auto_image_enabled=auto_image_enabled,
+            image_gateway_base=image_gateway_base,
+        )
+        if tools
+        else ""
+    )
     prompt_injected = False
 
     if tool_prompt:
@@ -341,6 +411,8 @@ async def create(
         messages,
         local_tools,
         local_tool_choice,
+        auto_image_enabled=cfg.get_bool("features.claude_code_auto_image", True),
+        image_gateway_base=cfg.get_str("app.app_url", ""),
     )
     completed_action = _last_successful_tool_action(messages)
 

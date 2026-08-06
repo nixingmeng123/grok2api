@@ -438,6 +438,10 @@
           "label": "允许 NSFW 生成",
           "desc": "允许图像生成接口绕过 NSFW 内容过滤。"
         },
+        "claudeCodeAutoImage": {
+          "label": "Claude Code 自动生图",
+          "desc": "任务需要原创位图素材时，允许 Claude Code 调用 grok-imagine-image-lite 并将图片下载到当前工作区。"
+        },
         "showSearchSources": {
           "label": "正文追加信源",
           "desc": "搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。"

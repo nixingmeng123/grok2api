@@ -438,6 +438,10 @@
           "label": "Allow NSFW Generation",
           "desc": "Permits the image generation endpoint to bypass NSFW content filtering."
         },
+        "claudeCodeAutoImage": {
+          "label": "Claude Code Automatic Image Generation",
+          "desc": "Allows Claude Code to call grok-imagine-image-lite and download original raster assets into the current workspace when a task needs them."
+        },
         "showSearchSources": {
           "label": "Append Sources to Content",
           "desc": "Search sources are always output in the search_sources field. This option controls whether to also append a ## Sources section to the response content (for backward compatibility with text-parsing clients)."

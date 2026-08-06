@@ -38,6 +38,8 @@ thinking_summary = false
 dynamic_statsig = true
 # 是否允许生成 NSFW 图片
 enable_nsfw = true
+# Claude Code 需要原创位图素材时，允许通过本项目图片 API 自动生成并下载到工作区
+claude_code_auto_image = true
 # 搜索信源始终以 search_sources 结构化字段输出（无需此开关）。
 # 此选项仅控制是否同时在响应正文末尾追加 ## Sources 纯文本段落（兼容文本解析客户端）。
 show_search_sources = false
