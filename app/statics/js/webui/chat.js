@@ -5,9 +5,13 @@
   const PREFERRED_MODEL = 'grok-4.20-0309-non-reasoning';
   const STORE_KEY = 'grok2api_webui_chat_sessions_v1';
   const SIDEBAR_STORE_KEY = 'grok2api_webui_sidebar_collapsed_v1';
+  const DEFAULT_VIDEO_SIZE = '720x1280';
+  const VIDEO_SIZES = new Set(['720x1280', '1280x720', '1024x1024']);
 
   const chatLayout = document.getElementById('chatLayout');
   const modelSelect = document.getElementById('modelSelect');
+  const videoRatioWrap = document.getElementById('videoRatioWrap');
+  const videoRatioSelect = document.getElementById('videoRatioSelect');
   const systemInput = document.getElementById('systemInput');
   const thread = document.getElementById('thread');
   const emptyState = document.getElementById('emptyState');
@@ -654,6 +658,7 @@
       title: text('webui.chat.untitled', 'New Chat'),
       titleLocked: false,
       model: modelSelect.value || PREFERRED_MODEL,
+      videoSize: currentVideoSize(),
       system: '',
       messages: [],
       updatedAt: Date.now(),
@@ -666,6 +671,7 @@
       title: item && item.title ? String(item.title) : text('webui.chat.untitled', 'New Chat'),
       titleLocked: Boolean(item && item.titleLocked),
       model: item && item.model ? String(item.model) : PREFERRED_MODEL,
+      videoSize: normalizeVideoSize(item && item.videoSize),
       system: item && item.system ? String(item.system) : '',
       messages: Array.isArray(item && item.messages)
         ? item.messages
@@ -844,6 +850,22 @@
     return selected && selected.capability ? selected.capability : 'chat';
   }
 
+  function normalizeVideoSize(value) {
+    const size = String(value || '');
+    return VIDEO_SIZES.has(size) ? size : DEFAULT_VIDEO_SIZE;
+  }
+
+  function currentVideoSize() {
+    return normalizeVideoSize(videoRatioSelect && videoRatioSelect.value);
+  }
+
+  function updateVideoRatioControl() {
+    if (!videoRatioWrap || !videoRatioSelect) return;
+    const isVideo = currentModelCapability() === 'video';
+    videoRatioWrap.hidden = !isVideo;
+    videoRatioSelect.disabled = !isVideo;
+  }
+
   async function fileToDataUrl(file) {
     return await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -970,6 +992,7 @@
     messages = messages.slice(0, messageIndex);
     session.messages = messages;
     session.model = modelSelect.value || PREFERRED_MODEL;
+    session.videoSize = currentVideoSize();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1332,6 +1355,7 @@
     const session = getCurrentSession();
     if (!session) return;
     session.model = modelSelect.value || PREFERRED_MODEL;
+    session.videoSize = currentVideoSize();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1352,6 +1376,8 @@
         ? session.model
         : (modelSelect.value || PREFERRED_MODEL);
     }
+    if (videoRatioSelect) videoRatioSelect.value = normalizeVideoSize(session.videoSize);
+    updateVideoRatioControl();
     renderUploadMeta();
     renderSessionList();
     renderThread();
@@ -1367,6 +1393,8 @@
     messages = session.messages;
     pendingFiles = [];
     activeEdit = null;
+    if (videoRatioSelect) videoRatioSelect.value = normalizeVideoSize(session.videoSize);
+    updateVideoRatioControl();
     renderUploadMeta();
     renderSessionList();
     renderThread();
@@ -1429,13 +1457,17 @@
     messages
       .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
       .forEach((message) => outgoing.push(message));
-    return {
+    const payload = {
       model: modelSelect.value || PREFERRED_MODEL,
       messages: outgoing,
       stream: true,
       temperature: 0.8,
       top_p: 0.95,
     };
+    if (currentModelCapability() === 'video') {
+      payload.video_config = { size: currentVideoSize() };
+    }
+    return payload;
   }
 
   async function loadModels() {
@@ -1481,6 +1513,7 @@
     }
 
     session.model = modelSelect.value || PREFERRED_MODEL;
+    session.videoSize = currentVideoSize();
     session.system = currentSystemPrompt();
     messages.push(userMessage);
     if (!session.titleLocked) session.title = createSessionTitle(messages);
@@ -1662,7 +1695,11 @@
     }
     sendMessage();
   });
-  modelSelect.addEventListener('change', syncCurrentSession);
+  modelSelect.addEventListener('change', () => {
+    updateVideoRatioControl();
+    syncCurrentSession();
+  });
+  videoRatioSelect?.addEventListener('change', syncCurrentSession);
   systemInput?.addEventListener('change', syncCurrentSession);
   uploadBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {

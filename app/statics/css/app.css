@@ -676,12 +676,20 @@ button{cursor:pointer}
 .webui-upload-btn:hover{background:rgba(0,0,0,.05);color:#1f1c18}
 .webui-upload-btn svg{width:18px;height:18px;stroke-width:1.9}
 .webui-sendbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:0 0 auto}
+.webui-sendbar-ratio{
+  display:grid;
+  min-width:88px;
+  max-width:104px;
+  flex:0 0 104px;
+}
+.webui-sendbar-ratio[hidden]{display:none}
 .webui-sendbar-model{
   display:grid;
   min-width:180px;
   max-width:220px;
   flex:0 1 220px;
 }
+.webui-sendbar-ratio .input,
 .webui-sendbar-model .input{
   height:36px;
   border:0;
@@ -698,6 +706,7 @@ button{cursor:pointer}
   appearance:none;
   background-image:none;
 }
+.webui-sendbar-ratio .input:focus,
 .webui-sendbar-model .input:focus{
   outline:none;
   box-shadow:none;
@@ -988,6 +997,7 @@ textarea.input.webui-textarea{padding:8px 0 !important;resize:none !important}
   .webui-input-shell{grid-template-columns:1fr;gap:8px;border-radius:22px;padding:10px 12px}
   .webui-upload-btn{display:none}
   .webui-sendbar{justify-content:flex-end}
+  .webui-sendbar-ratio{min-width:88px;max-width:104px;flex:0 0 104px}
   .webui-sendbar-model{min-width:0;max-width:none;flex:1 1 auto}
   .webui-sidebar-headtitle{font-size:17px}
   .webui-masonry-main{height:calc(100dvh - 88px);padding:14px 12px 18px;overflow:hidden}

@@ -55,6 +55,13 @@
             <input id="fileInput" type="file" hidden multiple>
             <textarea id="promptInput" class="input webui-textarea" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行" data-i18n-placeholder="webui.chat.promptPlaceholder"></textarea>
             <div class="webui-sendbar">
+              <label id="videoRatioWrap" class="webui-sendbar-ratio" hidden>
+                <select id="videoRatioSelect" class="input" data-i18n-aria-label="webui.chat.videoRatioLabel">
+                  <option value="720x1280" data-i18n="webui.chat.videoRatioPortrait">竖屏 9:16</option>
+                  <option value="1280x720" data-i18n="webui.chat.videoRatioLandscape">横屏 16:9</option>
+                  <option value="1024x1024" data-i18n="webui.chat.videoRatioSquare">方形 1:1</option>
+                </select>
+              </label>
               <label class="webui-sendbar-model">
                 <select id="modelSelect" class="input" data-i18n-aria-label="webui.chat.modelLabel"></select>
               </label>
