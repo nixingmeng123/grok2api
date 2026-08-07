@@ -310,6 +310,67 @@
       || /\.(mp4|webm|mov|m4v|ogg)(\?|#|$)/.test(normalized);
   }
 
+  function absoluteMediaUrl(value) {
+    try {
+      const url = new URL(String(value || '').trim(), window.location.origin);
+      return url.protocol === 'https:' ? url.href : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function extractGeneratedMediaUrl(content, kind) {
+    const source = typeof content === 'string' ? content : '';
+    if (!source) return '';
+    const candidates = [];
+
+    if (kind === 'video') {
+      const videoTag = source.match(/<video\b[^>]*\bsrc=["']([^"']+)["']/i);
+      if (videoTag) candidates.push(videoTag[1]);
+      const sourceTag = source.match(/<source\b[^>]*\bsrc=["']([^"']+)["']/i);
+      if (sourceTag) candidates.push(sourceTag[1]);
+      const videoLink = source.match(/\[video\]\(([^)]+)\)/i);
+      if (videoLink) candidates.push(videoLink[1]);
+    } else {
+      const imageLinks = Array.from(source.matchAll(/!\[[^\]]*\]\(([^)]+)\)/gi));
+      imageLinks.forEach((match) => candidates.push(match[1]));
+    }
+
+    const urls = source.match(/(?:https?:\/\/[^\s<>"']+|\/v1\/files\/(?:image|video)\?id=[^\s<>"']+)/gi) || [];
+    candidates.push(...urls);
+    const predicate = kind === 'video' ? isVideoUrl : isImageUrl;
+    for (const candidate of candidates) {
+      const cleaned = String(candidate || '').replace(/[),.;]+$/, '').trim();
+      if (!predicate(cleaned)) continue;
+      const absolute = absoluteMediaUrl(cleaned);
+      if (absolute) return absolute;
+    }
+    return '';
+  }
+
+  function latestGeneratedMedia(kind) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || message.role !== 'assistant') continue;
+      const storedReference = message.media_reference;
+      const storedUrl = storedReference && storedReference.type === kind
+        ? String(storedReference.url || '').trim()
+        : '';
+      const url = storedUrl || extractGeneratedMediaUrl(message.content, kind);
+      if (!url) return null;
+      let prompt = '';
+      for (let promptIndex = index - 1; promptIndex >= 0; promptIndex -= 1) {
+        const candidate = messages[promptIndex];
+        if (candidate && candidate.role === 'user') {
+          prompt = extractTextContent(candidate.content);
+          if (prompt) break;
+        }
+      }
+      return { url, prompt };
+    }
+    return null;
+  }
+
   function normalizeMediaContent(source) {
     const input = String(source || '').replace(/\[video\]\(([^)]+)\)/gi, '$1');
     return input.replace(/^(https?:\/\/\S+|\/v1\/files\/(?:image|video)\?id=\S+|data:image\/[^\s]+)$/gm, (match) => {
@@ -893,7 +954,11 @@
   }
 
   function buildUserMessage(prompt, capability) {
-    const textBlock = prompt ? [{ type: 'text', text: prompt }] : [];
+    const previousImage = capability === 'image' ? latestGeneratedMedia('image') : null;
+    const contextualPrompt = previousImage && previousImage.prompt
+      ? `Continue the previous image request while preserving its subject, scene, composition, and style. Previous request: ${previousImage.prompt}\nRequested change: ${prompt}`
+      : prompt;
+    const textBlock = contextualPrompt ? [{ type: 'text', text: contextualPrompt }] : [];
     const imageFiles = pendingFiles.filter((file) => (file.type || '').startsWith('image/'));
     const audioFiles = pendingFiles.filter((file) => (file.type || '').startsWith('audio/'));
     const otherFiles = pendingFiles.filter((file) => {
@@ -927,7 +992,11 @@
           'Image generation does not accept uploaded references here. Use chat, image edit, or video with a reference image.',
         ));
       }
-      return { role: 'user', content: prompt };
+      return {
+        role: 'user',
+        content: prompt,
+        ...(contextualPrompt !== prompt ? { webui_request_content: contextualPrompt } : {}),
+      };
     }
     if (capability === 'image_edit') {
       if (!imageBlocks.length) {
@@ -942,9 +1011,20 @@
       if (audioBlocks.length || fileBlocks.length) {
         throw new Error(text('webui.chat.errors.videoImageOnly', 'Video generation only supports image reference uploads'));
       }
-      return imageBlocks.length
-        ? { role: 'user', content: [...textBlock, imageBlocks[0]] }
-        : { role: 'user', content: prompt };
+      if (imageBlocks.length) {
+        return { role: 'user', content: [...textBlock, imageBlocks[0]] };
+      }
+      const previousVideo = latestGeneratedMedia('video');
+      if (previousVideo) {
+        return {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'video_url', video_url: { url: previousVideo.url } },
+          ],
+        };
+      }
+      return { role: 'user', content: prompt };
     }
     if (imageBlocks.length || audioBlocks.length || fileBlocks.length) {
       return { role: 'user', content: [...textBlock, ...imageBlocks, ...audioBlocks, ...fileBlocks] };
@@ -1104,6 +1184,7 @@
       likeBtn: null,
       dislikeBtn: null,
       renderFrame: 0,
+      mediaReference: null,
     };
 
     if (role === 'assistant') {
@@ -1456,7 +1537,13 @@
     if (system) outgoing.push({ role: 'system', content: system });
     messages
       .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
-      .forEach((message) => outgoing.push(message));
+      .forEach((message) => {
+        if (message.webui_request_content) {
+          outgoing.push({ role: message.role, content: message.webui_request_content });
+          return;
+        }
+        outgoing.push(message);
+      });
     const payload = {
       model: modelSelect.value || PREFERRED_MODEL,
       messages: outgoing,
@@ -1568,6 +1655,7 @@
             role: 'assistant',
             content: assistantEntry.text,
             reasoning_content: finalReasoning,
+            ...(assistantEntry.mediaReference ? { media_reference: assistantEntry.mediaReference } : {}),
             createdAt: assistantCreatedAt,
             feedback: '',
           });
@@ -1593,6 +1681,9 @@
 
         const choice = json && json.choices && json.choices[0];
         const delta = choice && choice.delta ? choice.delta : {};
+        if (delta.media_reference && delta.media_reference.type && delta.media_reference.url) {
+          assistantEntry.mediaReference = delta.media_reference;
+        }
         if (typeof delta.reasoning_content === 'string') {
           updateReasoning(assistantEntry, delta.reasoning_content);
           if (hasVisibleReasoning(assistantEntry.reasoningText)) {
@@ -1626,6 +1717,7 @@
         role: 'assistant',
         content: assistantEntry.text,
         reasoning_content: finalReasoning,
+        ...(assistantEntry.mediaReference ? { media_reference: assistantEntry.mediaReference } : {}),
         createdAt: assistantCreatedAt,
         feedback: '',
       });

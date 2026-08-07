@@ -49,6 +49,7 @@ CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"             # POST (OpenAI Re
 CONSOLE_CHAT      = f"{CONSOLE_BASE}/v1/chat/completions"      # POST (OpenAI Chat API)
 CONSOLE_DPOP_TOKEN = f"{CONSOLE_BASE}/v1/dpop/token"           # POST (short-lived DPoP token)
 CONSOLE_VIDEO_GENERATIONS = f"{CONSOLE_BASE}/v1/videos/generations"  # POST
+CONSOLE_VIDEO_EDITS = f"{CONSOLE_BASE}/v1/videos/edits"              # POST
 CONSOLE_VIDEOS = f"{CONSOLE_BASE}/v1/videos"                  # GET /{request_id}
 
 
@@ -61,5 +62,5 @@ __all__ = [
     "MEDIA_POST", "MEDIA_POST_LINK", "VIDEO_UPSCALE",
     "WS_IMAGINE", "WS_LIVEKIT", "LIVEKIT_TOKENS",
     "CONSOLE_RESPONSES", "CONSOLE_CHAT", "CONSOLE_DPOP_TOKEN",
-    "CONSOLE_VIDEO_GENERATIONS", "CONSOLE_VIDEOS",
+    "CONSOLE_VIDEO_GENERATIONS", "CONSOLE_VIDEO_EDITS", "CONSOLE_VIDEOS",
 ]

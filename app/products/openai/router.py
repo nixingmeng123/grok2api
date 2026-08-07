@@ -154,7 +154,7 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive"}
 # ---------------------------------------------------------------------------
 
 _VALID_ROLES = {"developer", "system", "user", "assistant", "tool"}
-_USER_BLOCK_TYPES = {"text", "image_url", "input_audio", "file"}
+_USER_BLOCK_TYPES = {"text", "image_url", "video_url", "input_audio", "file"}
 _ALLOWED_SIZES = {"1280x720", "720x1280", "1792x1024", "1024x1792", "1024x1024"}
 _EFFORT_VALUES = {"none", "minimal", "low", "medium", "high", "xhigh"}
 _LITE_IMAGE_MODELS = {"grok-imagine-image-lite"}
