@@ -7,11 +7,15 @@
   const SIDEBAR_STORE_KEY = 'grok2api_webui_sidebar_collapsed_v1';
   const DEFAULT_VIDEO_SIZE = '720x1280';
   const VIDEO_SIZES = new Set(['720x1280', '1280x720', '1024x1024']);
+  const DEFAULT_VIDEO_FOLLOWUP_MODE = 'frame';
+  const VIDEO_FOLLOWUP_MODES = new Set(['frame', 'edit']);
 
   const chatLayout = document.getElementById('chatLayout');
   const modelSelect = document.getElementById('modelSelect');
   const videoRatioWrap = document.getElementById('videoRatioWrap');
   const videoRatioSelect = document.getElementById('videoRatioSelect');
+  const videoFollowupWrap = document.getElementById('videoFollowupWrap');
+  const videoFollowupSelect = document.getElementById('videoFollowupSelect');
   const systemInput = document.getElementById('systemInput');
   const thread = document.getElementById('thread');
   const emptyState = document.getElementById('emptyState');
@@ -356,7 +360,11 @@
       const storedUrl = storedReference && storedReference.type === kind
         ? String(storedReference.url || '').trim()
         : '';
-      const url = storedUrl || extractGeneratedMediaUrl(message.content, kind);
+      const storedFrameUrl = storedReference && storedReference.type === kind
+        ? String(storedReference.frame_url || '').trim()
+        : '';
+      const displayUrl = extractGeneratedMediaUrl(message.content, kind);
+      const url = storedUrl || displayUrl;
       if (!url) return null;
       let prompt = '';
       for (let promptIndex = index - 1; promptIndex >= 0; promptIndex -= 1) {
@@ -366,7 +374,7 @@
           if (prompt) break;
         }
       }
-      return { url, prompt };
+      return { url, displayUrl: displayUrl || url, frameUrl: storedFrameUrl, prompt };
     }
     return null;
   }
@@ -720,6 +728,7 @@
       titleLocked: false,
       model: modelSelect.value || PREFERRED_MODEL,
       videoSize: currentVideoSize(),
+      videoFollowupMode: currentVideoFollowupMode(),
       system: '',
       messages: [],
       updatedAt: Date.now(),
@@ -733,6 +742,7 @@
       titleLocked: Boolean(item && item.titleLocked),
       model: item && item.model ? String(item.model) : PREFERRED_MODEL,
       videoSize: normalizeVideoSize(item && item.videoSize),
+      videoFollowupMode: normalizeVideoFollowupMode(item && item.videoFollowupMode),
       system: item && item.system ? String(item.system) : '',
       messages: Array.isArray(item && item.messages)
         ? item.messages
@@ -920,11 +930,24 @@
     return normalizeVideoSize(videoRatioSelect && videoRatioSelect.value);
   }
 
+  function normalizeVideoFollowupMode(value) {
+    const mode = String(value || '');
+    return VIDEO_FOLLOWUP_MODES.has(mode) ? mode : DEFAULT_VIDEO_FOLLOWUP_MODE;
+  }
+
+  function currentVideoFollowupMode() {
+    return normalizeVideoFollowupMode(videoFollowupSelect && videoFollowupSelect.value);
+  }
+
   function updateVideoRatioControl() {
     if (!videoRatioWrap || !videoRatioSelect) return;
     const isVideo = currentModelCapability() === 'video';
     videoRatioWrap.hidden = !isVideo;
     videoRatioSelect.disabled = !isVideo;
+    if (videoFollowupWrap && videoFollowupSelect) {
+      videoFollowupWrap.hidden = !isVideo;
+      videoFollowupSelect.disabled = !isVideo;
+    }
   }
 
   async function fileToDataUrl(file) {
@@ -933,6 +956,65 @@
       reader.onload = () => resolve(String(reader.result || ''));
       reader.onerror = () => reject(reader.error || new Error('file read failed'));
       reader.readAsDataURL(file);
+    });
+  }
+
+  async function extractLastVideoFrame(sourceUrl) {
+    const source = absoluteMediaUrl(sourceUrl);
+    if (!source) throw new Error('Previous video URL is unavailable');
+
+    return await new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      const timeoutId = window.setTimeout(() => finish(new Error('Timed out while reading the previous video')), 30000);
+      let settled = false;
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        video.removeAttribute('src');
+        video.load();
+      };
+      const finish = (error, value = '') => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve(value);
+      };
+
+      video.crossOrigin = 'anonymous';
+      video.preload = 'auto';
+      video.muted = true;
+      video.playsInline = true;
+      video.addEventListener('error', () => finish(new Error('Failed to load the previous video')));
+      video.addEventListener('loadedmetadata', () => {
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          finish(new Error('The previous video has no readable duration'));
+          return;
+        }
+        video.currentTime = Math.max(0, video.duration - Math.min(0.05, video.duration / 2));
+      });
+      video.addEventListener('seeked', () => {
+        try {
+          if (!video.videoWidth || !video.videoHeight) {
+            finish(new Error('The previous video has no readable frame'));
+            return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const context = canvas.getContext('2d');
+          if (!context) {
+            finish(new Error('Unable to create a frame canvas'));
+            return;
+          }
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          finish(null, canvas.toDataURL('image/jpeg', 0.94));
+        } catch (error) {
+          finish(error);
+        }
+      });
+      video.src = source;
+      video.load();
     });
   }
 
@@ -953,7 +1035,7 @@
     return prepared;
   }
 
-  function buildUserMessage(prompt, capability) {
+  async function buildUserMessage(prompt, capability) {
     const previousImage = capability === 'image' ? latestGeneratedMedia('image') : null;
     const contextualPrompt = previousImage && previousImage.prompt
       ? `Continue the previous image request while preserving its subject, scene, composition, and style. Previous request: ${previousImage.prompt}\nRequested change: ${prompt}`
@@ -1016,11 +1098,36 @@
       }
       const previousVideo = latestGeneratedMedia('video');
       if (previousVideo) {
+        const followupMode = currentVideoFollowupMode();
+        const useFrameReference = followupMode === 'frame';
+        let referenceFrameUrl = '';
+        if (useFrameReference) {
+          try {
+            referenceFrameUrl = await extractLastVideoFrame(previousVideo.displayUrl || previousVideo.url);
+          } catch (error) {
+            throw new Error(text(
+              'webui.chat.errors.videoFrameUnavailable',
+              'Unable to extract the previous video final frame. Use local video proxy output or choose Video edit/concatenate.'
+            ), { cause: error });
+          }
+        }
+        const videoEditPrompt = [
+          useFrameReference
+            ? 'Use the attached previous frame as the strict visual reference.'
+            : 'Use the attached previous video as the strict visual reference.',
+          useFrameReference
+            ? 'Generate one new standalone video clip, not a copy of the source video and not a concatenation.'
+            : 'Edit or extend the referenced video. Concatenation is allowed in this manually selected mode.',
+          'Preserve the exact same person identity, appearance, clothing, setting, background, lighting, camera, framing, and visual style.',
+          `Apply only this requested change: ${prompt}`,
+        ].join('\n');
         return {
           role: 'user',
           content: [
-            { type: 'text', text: prompt },
-            { type: 'video_url', video_url: { url: previousVideo.url } },
+            { type: 'text', text: videoEditPrompt },
+            useFrameReference
+              ? { type: 'image_url', image_url: { url: referenceFrameUrl } }
+              : { type: 'video_url', video_url: { url: previousVideo.url } },
           ],
         };
       }
@@ -1073,6 +1180,7 @@
     session.messages = messages;
     session.model = modelSelect.value || PREFERRED_MODEL;
     session.videoSize = currentVideoSize();
+    session.videoFollowupMode = currentVideoFollowupMode();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1437,6 +1545,7 @@
     if (!session) return;
     session.model = modelSelect.value || PREFERRED_MODEL;
     session.videoSize = currentVideoSize();
+    session.videoFollowupMode = currentVideoFollowupMode();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1458,6 +1567,9 @@
         : (modelSelect.value || PREFERRED_MODEL);
     }
     if (videoRatioSelect) videoRatioSelect.value = normalizeVideoSize(session.videoSize);
+    if (videoFollowupSelect) {
+      videoFollowupSelect.value = normalizeVideoFollowupMode(session.videoFollowupMode);
+    }
     updateVideoRatioControl();
     renderUploadMeta();
     renderSessionList();
@@ -1475,6 +1587,9 @@
     pendingFiles = [];
     activeEdit = null;
     if (videoRatioSelect) videoRatioSelect.value = normalizeVideoSize(session.videoSize);
+    if (videoFollowupSelect) {
+      videoFollowupSelect.value = normalizeVideoFollowupMode(session.videoFollowupMode);
+    }
     updateVideoRatioControl();
     renderUploadMeta();
     renderSessionList();
@@ -1593,7 +1708,7 @@
 
     let userMessage;
     try {
-      userMessage = buildUserMessage(prompt, capability);
+      userMessage = await buildUserMessage(prompt, capability);
     } catch (error) {
       toast(error.message || String(error), 'error');
       return;
@@ -1792,6 +1907,7 @@
     syncCurrentSession();
   });
   videoRatioSelect?.addEventListener('change', syncCurrentSession);
+  videoFollowupSelect?.addEventListener('change', syncCurrentSession);
   systemInput?.addEventListener('change', syncCurrentSession);
   uploadBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
