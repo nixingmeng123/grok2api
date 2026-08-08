@@ -41,11 +41,14 @@ from app.dataplane.reverse.protocol.xai_assets import (
 )
 from app.dataplane.reverse.protocol.xai_chat import classify_line, raise_for_stream_error
 from app.dataplane.reverse.protocol.xai_console_video import (
+    build_console_video_edit_payload,
     build_console_video_payload,
     download_console_video,
+    edit_console_video,
     generate_console_video,
     trusted_console_video_url,
     valid_console_image_url,
+    valid_console_video_input_url,
 )
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import (
@@ -767,21 +770,38 @@ async def _generate_console_video_with_token(
     seconds: int,
     timeout_s: float,
     input_references: list[dict[str, Any]] | None = None,
+    video_reference_url: str = "",
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
-    payload = build_console_video_payload(
-        prompt=prompt,
-        duration=seconds,
-        aspect_ratio=aspect_ratio,
-        resolution=resolution_name,
-        image_url=_console_reference_url(input_references),
-    )
-    result = await generate_console_video(
-        token,
-        payload,
-        timeout_s=timeout_s,
-        progress_cb=progress_cb,
-    )
+    if video_reference_url:
+        logger.info(
+            "console video request: mode=edit reference_host={}",
+            urlparse(video_reference_url).hostname or "unknown",
+        )
+        payload = build_console_video_edit_payload(
+            prompt=prompt,
+            video_url=video_reference_url,
+        )
+        result = await edit_console_video(
+            token,
+            payload,
+            timeout_s=timeout_s,
+            progress_cb=progress_cb,
+        )
+    else:
+        payload = build_console_video_payload(
+            prompt=prompt,
+            duration=seconds,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution_name,
+            image_url=_console_reference_url(input_references),
+        )
+        result = await generate_console_video(
+            token,
+            payload,
+            timeout_s=timeout_s,
+            progress_cb=progress_cb,
+        )
     return _VideoArtifact(
         video_url=result.url,
         video_post_id="",
@@ -800,9 +820,10 @@ async def _run_video_generation(
     seconds: int,
     preset: str = "custom",
     input_references: list[dict[str, Any]] | None = None,
+    video_reference_url: str = "",
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
-    if _should_use_console_video(
+    if video_reference_url or _should_use_console_video(
         seconds=seconds,
         input_references=input_references,
     ):
@@ -815,6 +836,7 @@ async def _run_video_generation(
                 seconds=seconds,
                 timeout_s=timeout_s,
                 input_references=input_references,
+                video_reference_url=video_reference_url,
                 progress_cb=progress_cb,
             )
 
@@ -1138,9 +1160,10 @@ async def content_path(video_id: str) -> Path:
 
 def _extract_video_prompt_and_reference(
     messages: list[dict],
-) -> tuple[str, list[dict[str, Any]] | None]:
+) -> tuple[str, list[dict[str, Any]] | None, str]:
     prompt = ""
     reference_urls: list[str] = []
+    video_reference_url = ""
 
     for msg in reversed(messages):
         content = msg.get("content", "")
@@ -1154,6 +1177,7 @@ def _extract_video_prompt_and_reference(
 
         text_parts: list[str] = []
         block_references: list[str] = []
+        block_video_reference = ""
         for item in content:
             if not isinstance(item, dict):
                 continue
@@ -1170,11 +1194,21 @@ def _extract_video_prompt_and_reference(
                         block_references.append(url)
                 elif isinstance(image_url, str) and image_url.strip():
                     block_references.append(image_url.strip())
+            elif item_type == "video_url":
+                video_url = item.get("video_url")
+                if isinstance(video_url, dict):
+                    url = str(video_url.get("url") or "").strip()
+                else:
+                    url = str(video_url or "").strip()
+                if url:
+                    block_video_reference = url
 
         if text_parts:
             prompt = " ".join(text_parts)
         if block_references and not reference_urls:
             reference_urls = block_references
+        if block_video_reference and not video_reference_url:
+            video_reference_url = block_video_reference
         if prompt:
             break
 
@@ -1184,7 +1218,12 @@ def _extract_video_prompt_and_reference(
     input_references: list[dict[str, Any]] | None = None
     if reference_urls:
         input_references = [{"image_url": url} for url in reference_urls[:7]]
-    return prompt, input_references
+    if video_reference_url and not valid_console_video_input_url(video_reference_url):
+        raise ValidationError(
+            "Video reference must be a public HTTPS URL or video data URL",
+            param="messages",
+        )
+    return prompt, input_references, video_reference_url
 
 
 async def completions(
@@ -1205,13 +1244,15 @@ async def completions(
         default=default_resolution_name,
     )
     resolved_preset = _resolve_video_preset(preset)
-    prompt, input_references = _extract_video_prompt_and_reference(messages)
+    prompt, input_references, video_reference_url = _extract_video_prompt_and_reference(messages)
 
     cfg = get_config()
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", False)
     response_id = make_response_id()
 
-    async def _run(progress_cb: Callable[[int], Awaitable[None]] | None = None) -> str:
+    async def _run(
+        progress_cb: Callable[[int], Awaitable[None]] | None = None,
+    ) -> tuple[str, str]:
         artifact = await _run_video_generation(
             model=model,
             prompt=prompt,
@@ -1220,14 +1261,16 @@ async def completions(
             seconds=seconds,
             preset=resolved_preset,
             input_references=input_references,
+            video_reference_url=video_reference_url,
             progress_cb=progress_cb,
         )
         file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
-        return await _resolve_video_output(
+        content = await _resolve_video_output(
             token=artifact.auth_token,
             url=artifact.video_url,
             file_id=file_id,
         )
+        return content, artifact.video_url
 
     if is_stream:
 
@@ -1257,8 +1300,12 @@ async def completions(
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                     last_emit_at = time.monotonic()
 
-            content = await task
+            content, media_reference = await task
             chunk = make_stream_chunk(response_id, model, content)
+            chunk["choices"][0]["delta"]["media_reference"] = {
+                "type": "video",
+                "url": media_reference,
+            }
             yield f"data: {orjson.dumps(chunk).decode()}\n\n"
             final = make_stream_chunk(response_id, model, "", is_final=True)
             yield f"data: {orjson.dumps(final).decode()}\n\n"
@@ -1273,15 +1320,17 @@ async def completions(
         if not progress_updates or progress_updates[-1] != reason:
             progress_updates.append(reason)
 
-    content = await _run(progress_cb=_progress)
+    content, media_reference = await _run(progress_cb=_progress)
     reasoning = "\n".join(progress_updates) if progress_updates else None
-    return make_chat_response(
+    response = make_chat_response(
         model,
         content,
         prompt_content=prompt,
         response_id=response_id,
         reasoning_content=reasoning,
     )
+    response["media_reference"] = {"type": "video", "url": media_reference}
+    return response
 
 
 __all__ = [

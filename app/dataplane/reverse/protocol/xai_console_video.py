@@ -19,6 +19,7 @@ from app.dataplane.reverse.protocol.xai_console_dpop import (
 )
 from app.dataplane.reverse.runtime.endpoint_table import (
     CONSOLE_DPOP_TOKEN,
+    CONSOLE_VIDEO_EDITS,
     CONSOLE_VIDEO_GENERATIONS,
     CONSOLE_VIDEOS,
 )
@@ -71,10 +72,39 @@ def build_console_video_payload(
     return payload
 
 
+def build_console_video_edit_payload(
+    *,
+    prompt: str,
+    video_url: str,
+) -> dict[str, Any]:
+    cleaned_prompt = prompt.strip()
+    if not cleaned_prompt:
+        raise ValidationError("Video edit requires a prompt")
+    if not valid_console_video_input_url(video_url):
+        raise ValidationError(
+            "Console video edit input must be a public HTTPS URL or video data URL",
+            param="video_reference.video_url",
+        )
+    return {
+        "model": "grok-imagine-video",
+        "prompt": cleaned_prompt,
+        "video": {"url": video_url.strip()},
+    }
+
+
 def valid_console_image_url(value: str) -> bool:
     normalized = value.strip()
     lowered = normalized.lower()
     if lowered.startswith("data:image/"):
+        return ";base64," in lowered
+    parsed = urlparse(normalized)
+    return parsed.scheme == "https" and bool(parsed.netloc) and parsed.username is None
+
+
+def valid_console_video_input_url(value: str) -> bool:
+    normalized = value.strip()
+    lowered = normalized.lower()
+    if lowered.startswith("data:video/"):
         return ";base64," in lowered
     parsed = urlparse(normalized)
     return parsed.scheme == "https" and bool(parsed.netloc) and parsed.username is None
@@ -122,12 +152,13 @@ async def generate_console_video(
     *,
     timeout_s: float,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
+    create_url: str = CONSOLE_VIDEO_GENERATIONS,
 ) -> ConsoleVideoResult:
     deadline = asyncio.get_running_loop().time() + timeout_s
     created = await _request_json(
         token,
         method="POST",
-        url=CONSOLE_VIDEO_GENERATIONS,
+        url=create_url,
         payload=payload,
         timeout_s=_remaining_timeout(deadline),
     )
@@ -156,6 +187,22 @@ async def generate_console_video(
         # retry this failure by submitting another billable generation.
         exc.details["video_request_id"] = request_id
         raise
+
+
+async def edit_console_video(
+    token: str,
+    payload: dict[str, Any],
+    *,
+    timeout_s: float,
+    progress_cb: Callable[[int], Awaitable[None]] | None = None,
+) -> ConsoleVideoResult:
+    return await generate_console_video(
+        token,
+        payload,
+        timeout_s=timeout_s,
+        progress_cb=progress_cb,
+        create_url=CONSOLE_VIDEO_EDITS,
+    )
 
 
 async def download_console_video(url: str, *, timeout_s: float) -> tuple[bytes, str]:
@@ -336,11 +383,14 @@ def _status_feedback(status: int) -> ProxyFeedback:
 
 __all__ = [
     "ConsoleVideoResult",
+    "build_console_video_edit_payload",
     "build_console_video_payload",
     "download_console_video",
+    "edit_console_video",
     "generate_console_video",
     "parse_console_video_create",
     "parse_console_video_status",
     "trusted_console_video_url",
     "valid_console_image_url",
+    "valid_console_video_input_url",
 ]

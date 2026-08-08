@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.dataplane.reverse.protocol.xai_console_video import (
+    build_console_video_edit_payload,
     build_console_video_payload,
+    edit_console_video,
     generate_console_video,
     parse_console_video_create,
     parse_console_video_status,
@@ -62,6 +64,17 @@ class ConsoleVideoPayloadTests(unittest.TestCase):
             payload["image"],
             {"url": "data:image/png;base64,AAAA"},
         )
+
+    def test_video_edit_payload(self):
+        payload = build_console_video_edit_payload(
+            prompt="make the person stand up",
+            video_url="https://vidgen.x.ai/source.mp4",
+        )
+        self.assertEqual(payload, {
+            "model": "grok-imagine-video",
+            "prompt": "make the person stand up",
+            "video": {"url": "https://vidgen.x.ai/source.mp4"},
+        })
 
     def test_rejects_unsupported_duration(self):
         with self.assertRaises(ValidationError):
@@ -188,8 +201,82 @@ class ConsoleVideoTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager.get.await_args_list[1].kwargs["force"])
         self.assertIn("req%2F1", fake_session.get.await_args_list[0].args[0])
 
+    async def test_video_edit_uses_edit_endpoint(self):
+        fake_session = _FakeSession(
+            post_responses=[_FakeResponse(200, b'{"request_id":"edit-1"}')],
+            get_responses=[
+                _FakeResponse(
+                    200,
+                    b'{"status":"completed","progress":100,"video":{"url":"https://vidgen.x.ai/edited.mp4"}}',
+                ),
+            ],
+        )
+        proxy = SimpleNamespace(acquire=AsyncMock(return_value=None), feedback=AsyncMock())
+        dpop_session = SimpleNamespace(access_token="access-token")
+        manager = SimpleNamespace(
+            get=AsyncMock(return_value=(dpop_session, "cache-key")),
+            invalidate=Mock(),
+        )
+
+        with (
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.get_proxy_runtime",
+                AsyncMock(return_value=proxy),
+            ),
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.ResettableSession",
+                return_value=fake_session,
+            ),
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.build_session_kwargs",
+                return_value={},
+            ),
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.build_console_headers",
+                return_value={},
+            ),
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.apply_dpop_headers",
+            ),
+            patch(
+                "app.dataplane.reverse.protocol.xai_console_video.dpop_sessions",
+                manager,
+            ),
+        ):
+            result = await edit_console_video(
+                "sso-token",
+                build_console_video_edit_payload(
+                    prompt="stand up",
+                    video_url="https://vidgen.x.ai/source.mp4",
+                ),
+                timeout_s=30,
+            )
+
+        self.assertEqual(result.url, "https://vidgen.x.ai/edited.mp4")
+        self.assertEqual(
+            fake_session.post.await_args.args[0],
+            "https://console.x.ai/v1/videos/edits",
+        )
+
 
 class ConsoleVideoRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def test_extracts_structured_video_reference(self):
+        prompt, images, video_url = video_service._extract_video_prompt_and_reference([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "make the person stand up"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "https://vidgen.x.ai/source.mp4"},
+                    },
+                ],
+            }
+        ])
+        self.assertEqual(prompt, "make the person stand up")
+        self.assertIsNone(images)
+        self.assertEqual(video_url, "https://vidgen.x.ai/source.mp4")
+
     async def test_supported_request_uses_console_protocol(self):
         artifact = video_service._VideoArtifact("https://vidgen.x.ai/a.mp4", "", "", "")
         console = AsyncMock(return_value=artifact)
@@ -204,6 +291,26 @@ class ConsoleVideoRoutingTests(unittest.IsolatedAsyncioTestCase):
                 aspect_ratio="16:9",
                 resolution_name="720p",
                 seconds=6,
+            )
+        self.assertIs(result, artifact)
+        console.assert_awaited_once()
+        legacy.assert_not_awaited()
+
+    async def test_video_edit_uses_console_protocol(self):
+        artifact = video_service._VideoArtifact("https://vidgen.x.ai/edited.mp4", "", "", "")
+        console = AsyncMock(return_value=artifact)
+        legacy = AsyncMock()
+        with (
+            patch.object(video_service, "_run_console_video_with_account", console),
+            patch.object(video_service, "_run_video_with_account", legacy),
+        ):
+            result = await video_service._run_video_generation(
+                model="grok-imagine-video",
+                prompt="stand up",
+                aspect_ratio="16:9",
+                resolution_name="720p",
+                seconds=6,
+                video_reference_url="https://vidgen.x.ai/source.mp4",
             )
         self.assertIs(result, artifact)
         console.assert_awaited_once()
@@ -302,6 +409,7 @@ class ConsoleVideoRoutingTests(unittest.IsolatedAsyncioTestCase):
             chunks = [chunk async for chunk in stream]
 
         self.assertIn(": heartbeat\n\n", chunks)
+        self.assertTrue(any('"media_reference"' in chunk for chunk in chunks))
         self.assertTrue(any('"finish_reason":"stop"' in chunk for chunk in chunks))
 
 
